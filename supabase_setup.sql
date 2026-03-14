@@ -18,6 +18,19 @@ CREATE TABLE IF NOT EXISTS players (
   auth_code TEXT,
   auth_code_valid BOOLEAN DEFAULT TRUE,
   latest_match_id TEXT,
+  wins INTEGER DEFAULT 0,
+  losses INTEGER DEFAULT 0,
+  ties INTEGER DEFAULT 0,
+  total_matches INTEGER DEFAULT 0,
+  waiting_matches INTEGER DEFAULT 0,
+  avg_kd FLOAT DEFAULT 0,
+  avg_adr FLOAT DEFAULT 0,
+  avg_hs FLOAT DEFAULT 0,
+  avg_kast FLOAT DEFAULT 0,
+  avg_accuracy FLOAT DEFAULT 0,
+  avg_ttd FLOAT DEFAULT 0,
+  avg_rating FLOAT DEFAULT 0,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 

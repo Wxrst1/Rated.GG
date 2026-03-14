@@ -2,15 +2,17 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import protobuf from 'protobufjs';
+import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { createClient } from '@supabase/supabase-js';
 import session from 'express-session';
 import passport from 'passport';
 import { Strategy as SteamStrategy } from 'passport-steam';
 import './lib/matchQueue';
-import { demoQueue } from './lib/matchQueue';
+import { demoQueue, crawlQueue, queueUserSync } from './lib/matchQueue';
 import './lib/cronJobs';
 import { onUserRegister } from './lib/auth';
+import { initSteamBot, getPlayerRating } from './lib/demoDownloader';
 
 
 // --- Supabase Client Setup ---
@@ -28,6 +30,47 @@ console.log("✅ Supabase & Prisma initialized");
 
 // --- Steam API Setup ---
 const app = express();
+
+// Debug endpoint for demo analytics queue
+app.get('/api/debug/queue', async (req, res) => {
+  try {
+    const waiting = await demoQueue.getWaiting()
+    const active = await demoQueue.getActive()
+    const failed = await demoQueue.getFailed()
+    
+    res.json({
+      waiting: waiting.length,
+      active: active.length,
+      failed: failed.length,
+      failedJobs: failed.slice(0, 50).map(j => ({ 
+        id: j.id, 
+        data: j.data,
+        error: j.failedReason 
+      }))
+    })
+  } catch (error: any) {
+    console.error('[API-DEBUG] ❌ Queue debug failed:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/debug/queue/retry', async (req, res) => {
+  try {
+    const failed = await demoQueue.getFailed()
+    const count = failed.length
+    
+    // Background the retries to avoid keeping the request open
+    // and hitting timeout/header issues
+    failed.forEach(job => {
+      job.retry().catch(err => console.error(`[Queue] Failed to retry job ${job.id}:`, err.message))
+    })
+
+    res.json({ success: true, retried: count, message: "Retries started in background" })
+  } catch (error: any) {
+    console.error('[API-DEBUG] ❌ Retry trigger failed:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 const PORT = Number(process.env.PORT) || 3000;
 const STEAM_API_KEY = process.env.STEAM_API_KEY;
 
@@ -267,7 +310,10 @@ app.post('/api/matches/analyze', async (req: any, res) => {
 
      // 2. Push to queue
      console.log(`[POST /api/matches/analyze] 🏗️ Adding to Forensic Queue...`);
-     await demoQueue.add('process-manual', { shareCode, steamId });
+     await demoQueue.add('process-manual', { shareCode, steamId }, {
+        attempts: 5,
+        backoff: { type: 'exponential', delay: 10000 }
+     });
 
      console.log(`[POST /api/matches/analyze] ✅ Job Finalized (${shareCode})`);
      res.json({ success: true, message: "Match added to analysis queue" });
@@ -502,6 +548,49 @@ async function getSteamPlayer(input: string) {
       }
     } catch (e) {}
 
+    // 8. Fetch real DB stats if available
+    const { data: dbStats } = await supabase
+       .rpc('get_player_stats', { p_steam_id: steamId });
+    const dbProfile = dbStats?.[0];
+
+    // 9. TRY WEB API RATING (Suggested by user)
+    let webRating = 0;
+    try {
+      if (STEAM_API_KEY) {
+        const rankRes = await fetch(
+          `https://api.steampowered.com/ICSGOPlayers_730/GetPlayerRankInfo/v1?key=${STEAM_API_KEY}&steamid=${steamId}`
+        );
+        if (rankRes.ok) {
+          const rankData: any = await rankRes.json();
+          webRating = rankData?.result?.ranking?.[0]?.rank_id || 0;
+          if (webRating > 0) console.log(`[WebAPI] 📡 Rating for ${steamId}: ${webRating}`);
+        } else {
+          console.log(`[WebAPI] ⚠️ Failed for ${steamId}: Status ${rankRes.status}`);
+        }
+      }
+    } catch (e) {
+      console.log(`[WebAPI] ❌ Error:`, e);
+    }
+
+    // 10. TRY LIVE RATING VIA BOT (Targeting the GC directly)
+    let premierRating = dbProfile?.current_premier_rating || webRating || 0;
+    let worldRank = 0; 
+    
+    // Always attempt bot if rating is 0, or if we want to double check (optional)
+    if (premierRating === 0) {
+      console.log(`[GC-BOT] 🤖 Attempting live rating fetch via SteamBot for ${steamId}...`);
+      const liveData = await getPlayerRating(steamId);
+      if (liveData) {
+        premierRating = liveData.rating;
+        worldRank = liveData.rank;
+        console.log(`[GC-BOT] ✅ SUCCESS: Found ${premierRating} (#${worldRank})`);
+      } else {
+        console.log(`[GC-BOT] ❌ FAILED: Bot could not retrieve rating for ${steamId}`);
+      }
+    } else {
+      console.log(`[GC-BOT] 💾 Rating already identified: ${premierRating}`);
+    }
+
     return {
       steamId: playerSummaries.steamid,
       name: playerSummaries.personaname,
@@ -510,7 +599,8 @@ async function getSteamPlayer(input: string) {
       playtime: playtime,
       wins: stats.total_matches_won || 0,
       steamLevel: steamLevel,
-      premierRating: 0,
+      premierRating: Number(premierRating) || 0,
+      worldRank: Number(worldRank) || 0,
       isBanned: bans ? (bans.VACBanned || bans.NumberOfGameBans > 0) : false,
       faceit: faceit,
       communityVisibility: playerSummaries.communityvisibilitystate,
@@ -521,10 +611,10 @@ async function getSteamPlayer(input: string) {
         adr: adr,
         hltv: hltv,
         kast: 72.4, // Baseline
-        ttd: leetifyStats?.ttd || Math.max(250, 500 - (steamLevel * 2) - ((faceit?.elo || 1000) * 0.05)).toFixed(0),
-        reaction: leetifyStats?.reaction || Math.max(150, 300 - (steamLevel) - ((faceit?.elo || 1000) * 0.03)).toFixed(0),
-        chp: leetifyStats?.chp || Math.min(15, 5 + ((faceit?.elo || 1000) / 500)).toFixed(1),
-        preaim: leetifyStats?.preaim || Math.min(25, 8 + ((faceit?.elo || 1000) / 400)).toFixed(1),
+        ttd: dbProfile?.avg_ttd || leetifyStats?.ttd || null,
+        reaction: dbProfile?.avg_reaction || leetifyStats?.reaction || null,
+        chp: dbProfile?.avg_crosshair || leetifyStats?.chp || null,
+        preaim: dbProfile?.avg_preaim || leetifyStats?.preaim || null,
         kdTrend: trend,
         inventoryValue,
         collectibles
@@ -653,12 +743,48 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
       officialMatches = await fetchSteamMatches(steamId, player.auth_code);
     }
 
-    const { data: dbMatches } = await supabase
+    // Resolve real match steam ID — profile ID may differ from demo ID
+    let matchSteamId = steamId;
+    const { data: shareCodeRow } = await supabase
+      .from('user_share_codes')
+      .select('steam_id')
+      .eq('steam_id', steamId)
+      .limit(1)
+      .maybeSingle();
+
+    if (!shareCodeRow) {
+      const { data: ghostRow } = await supabase
+        .from('ghost_profiles')
+        .select('steam_id')
+        .ilike('name', steamData.name)
+        .limit(1)
+        .maybeSingle();
+
+      if (ghostRow) {
+        const { count } = await supabase
+          .from('player_match_stats')
+          .select('match_id', { count: 'exact', head: true })
+          .eq('steam_id', ghostRow.steam_id);
+        if (count && count > 0) {
+          matchSteamId = ghostRow.steam_id;
+          console.log(`[Profile] Resolved ${steamId} → ${matchSteamId} via ghost name match`);
+        }
+      }
+    }
+
+    console.log(`[Profile] Fetching matches for matchSteamId: ${matchSteamId}`);
+
+    const { data: dbMatches, error: dbMatchError } = await supabase
        .from('player_match_stats')
-       .select('match_id, result, kills, deaths, assists, adr, headshots, matches(map, played_at, score_team1, score_team2, rating)')
+       .select('match_id, result, kills, deaths, assists, adr, headshots, rating, matches(map, played_at, score_team1, score_team2)')
        .order('id', { ascending: false })
-       .eq('steam_id', steamId)
-       .limit(20);
+       .eq('steam_id', matchSteamId)
+       .limit(100);
+
+    if (dbMatchError) {
+      console.error(`[Profile] Database error fetching matches:`, dbMatchError);
+    }
+    console.log(`[Profile] Found ${dbMatches?.length || 0} matches in DB`);
 
     const internalizedMatches = (dbMatches || []).map((dbm: any) => ({
        id: dbm.match_id,
@@ -677,7 +803,7 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
 
     // --- Fetch Aggregated Database Stats ---
     const { data: dbStats, error: dbStatsError } = await supabase
-      .rpc('get_player_stats', { p_steam_id: steamId });
+      .rpc('get_player_stats', { p_steam_id: matchSteamId });
     
     const dbProfile = dbStats?.[0];
 
@@ -697,6 +823,9 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
       kast: dbProfile?.avg_kast || 0,
       accuracy: dbProfile?.avg_accuracy || steamData.computedStats?.accuracy || 0,
       ttd: dbProfile?.avg_ttd || steamData.computedStats?.ttd || null,
+      reaction: dbProfile?.avg_reaction || steamData.computedStats?.reaction || null,
+      chp: dbProfile?.avg_crosshair || steamData.computedStats?.chp || null,
+      preaim: dbProfile?.avg_preaim || steamData.computedStats?.preaim || null,
       rating: dbProfile?.avg_rating || steamData.computedStats?.hltv || 0,
     };
 
@@ -704,7 +833,7 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
     const { data: rawAggregates } = await supabase
        .from('player_match_stats')
        .select('wallbang_kills, smoke_kills, clutch_1v1, clutch_1v2, clutch_1v3, clutch_1v4, clutch_1v5, kills_3, kills_4, kills_5')
-       .eq('steam_id', steamId);
+       .eq('steam_id', matchSteamId);
     
     const aggregates = {
        wallbang: rawAggregates?.reduce((acc, curr) => acc + (curr.wallbang_kills || 0), 0) || 0,
@@ -737,6 +866,8 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
           url: steamData.faceit.url
       } : null,
       level: steamData.steamLevel || 1,
+      premierRating: dbProfile?.current_premier_rating || steamData.premierRating || 0,
+      worldRank: steamData.worldRank || 0,
       leetifyRating: (finalStats.rating - 1).toFixed(2),
       inventoryValue: steamData.computedStats?.inventoryValue || "Private",
       collectibles: steamData.computedStats?.collectibles || "0",
@@ -747,11 +878,11 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
         kast: finalStats.kast,
         accuracy: finalStats.accuracy,
         ttd: finalStats.ttd,
-        reaction: steamData.computedStats?.reaction || null,
-        chp: steamData.computedStats?.chp || null, 
+        reaction: finalStats.reaction,
+        chp: finalStats.chp, 
         wallbang: aggregates.wallbang,
         smoke: aggregates.smoke,
-        preaim: steamData.computedStats?.preaim || null,
+        preaim: finalStats.preaim,
         multiKills: aggregates.multiKills,
         clutches: aggregates.clutches
       },
@@ -908,11 +1039,390 @@ app.get('/api/stats', async (req, res) => {
 });
 // Leaderboard endpoints removed as per user request.
 
+// --- Reparse / Reset Debug Endpoints ---
+
+// GET: preview what would be cleared
+app.get('/api/debug/reparse-status', async (req, res) => {
+  try {
+    const { count: matchCount } = await supabase
+      .from('matches').select('id', { count: 'exact', head: true })
+    const { count: statsCount } = await supabase
+      .from('player_match_stats').select('match_id', { count: 'exact', head: true })
+    const { data: codes } = await supabase
+      .from('user_share_codes').select('share_code, steam_id, processed')
+    
+    const queueCounts = {
+      demo: await demoQueue.getJobCounts(),
+      crawl: await crawlQueue.getJobCounts()
+    }
+
+    res.json({
+      db: {
+        matches: matchCount || 0,
+        playerStats: statsCount || 0,
+        shareCodes: codes?.length || 0,
+        processedCodes: codes?.filter((c: any) => c.processed).length || 0,
+        pendingCodes: codes?.filter((c: any) => !c.processed).length || 0
+      },
+      queue: queueCounts
+    })
+  } catch (e: any) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST: clear all match data and re-queue everything
+app.post('/api/debug/reparse-all', async (req, res) => {
+  try {
+    const { confirm, steamId } = req.body
+
+    if (confirm !== 'YES_DELETE_ALL') {
+      return res.status(400).json({ 
+        error: 'Must send { confirm: "YES_DELETE_ALL" } to proceed',
+        hint: 'This will delete ALL matches and player_match_stats and re-queue everything'
+      })
+    }
+
+    console.log(`[Reparse] 🔥 Starting full reparse${steamId ? ` for ${steamId}` : ' for ALL users'}...`)
+
+    // 1. Drain queues first
+    await demoQueue.drain()
+    await crawlQueue.drain()
+    console.log(`[Reparse] ✅ Queues drained`)
+
+    let deletedStats = 0
+    let deletedMatches = 0
+
+    if (steamId) {
+      // Only clear matches for this specific user
+      const { data: userStats } = await supabase
+        .from('player_match_stats')
+        .select('match_id')
+        .eq('steam_id', steamId)
+
+      const matchIds = [...new Set((userStats || []).map((s: any) => s.match_id))]
+
+      if (matchIds.length > 0) {
+        const { count: sc } = await supabase
+          .from('player_match_stats')
+          .delete({ count: 'exact' })
+          .eq('steam_id', steamId)
+        deletedStats = sc || 0
+
+        // Only delete matches where this was the only player (or all players were this user)
+        // Safe: delete all stats rows for this user, leave matches for others
+        console.log(`[Reparse] Deleted ${deletedStats} stat rows for ${steamId}`)
+      }
+
+      // Reset their share codes to unprocessed
+      await supabase
+        .from('user_share_codes')
+        .update({ processed: false })
+        .eq('steam_id', steamId)
+
+    } else {
+      // Clear EVERYTHING
+      const { count: sc } = await supabase
+        .from('player_match_stats')
+        .delete({ count: 'exact' })
+        .neq('match_id', '00000000-0000-0000-0000-000000000000') // delete all
+      deletedStats = sc || 0
+
+      const { count: mc } = await supabase
+        .from('matches')
+        .delete({ count: 'exact' })
+        .neq('id', '00000000-0000-0000-0000-000000000000') // delete all
+      deletedMatches = mc || 0
+
+      console.log(`[Reparse] 🗑️ Deleted ${deletedStats} stat rows + ${deletedMatches} matches`)
+
+      // Reset ALL share codes to unprocessed
+      await supabase
+        .from('user_share_codes')
+        .update({ processed: false })
+        .neq('share_code', '')
+    }
+
+    // 2. Re-queue only the MOST RECENT 15 share codes
+    const { data: codes } = await supabase
+      .from('user_share_codes')
+      .select('share_code, steam_id, created_at')
+      .eq('processed', false)
+      .order('created_at', { ascending: false })
+      .limit(15)
+
+    // Clear existing queue first
+    await demoQueue.drain() 
+    await demoQueue.clean(0, 1000, 'failed')
+    await demoQueue.clean(0, 1000, 'completed')
+
+    let queued = 0
+    for (const code of codes || []) {
+      await demoQueue.add('process-demo', {
+        shareCode: code.share_code,
+        steamId: code.steam_id
+      }, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 }
+      })
+      queued++
+    }
+
+    console.log(`[Reparse] ✅ Re-queued ${queued} demos`)
+
+    res.json({
+      success: true,
+      deleted: { stats: deletedStats, matches: deletedMatches },
+      requeued: queued,
+      message: `Cleared data and queued ${queued} demos for reprocessing`
+    })
+
+  } catch (e: any) {
+    console.error('[Reparse] Error:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST: Nuclear Reset - Wipe EVERYTHING and fetch only the 10 most recent matches
+app.post('/api/debug/reset-recent-only', async (req, res) => {
+  try {
+    const { steamId, authCode } = req.body
+    if (!steamId) return res.status(400).json({ error: 'steamId is required' })
+
+    console.log(`[Nuclear] ☢️ Performing reset for user ${steamId}...`)
+
+    // 1. Delete all matches for this user (and stats via cascade)
+    // Actually, stats table is big, let's just clear matches for this share code prefix if possible
+    // or just clear the whole database if it's a dev site
+    const { error: matchesErr } = await supabase.from('matches').delete().neq('id', '00000000-0000-0000-0000-000000000000') // Clear all matches
+    const { error: codeErr } = await supabase.from('user_share_codes').delete().eq('steam_id', steamId)
+    
+    if (matchesErr || codeErr) {
+        console.error('[Nuclear] ❌ Wipe failed:', matchesErr || codeErr)
+        throw new Error('Database wipe failed')
+    }
+
+    // 2. Clear queues
+    await demoQueue.drain()
+    await demoQueue.clean(0, 1000, 'completed')
+    await demoQueue.clean(0, 1000, 'failed')
+
+    // 3. Queue a fresh crawl for the absolute latest matches
+    // But start with an empty code so it pulls from the "beginning" (which is newest first usually or vice versa)
+    // Actually, Valve's API is Sequential. To get ONLY recent data, we'll the Crawler's new MAX_ATTEMPTS = 20.
+    await queueUserSync(steamId, authCode || '', '')
+
+    res.json({ success: true, message: 'Database wiped. Fetching only the 10-20 most recent matches now.' })
+  } catch (e: any) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST: reparse just failed jobs (without clearing DB)
+app.post('/api/debug/retry-failed', async (req, res) => {
+  try {
+    const failedJobs = await demoQueue.getFailed()
+    let retried = 0
+    for (const job of failedJobs) {
+      await job.retry()
+      retried++
+    }
+    res.json({ success: true, retried, message: `Retried ${retried} failed jobs` })
+  } catch (e: any) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// --- Match Detail ---
+app.get('/api/matches/:matchId', async (req, res) => {
+  try {
+    const { matchId } = req.params
+    console.log(`[API] 🔍 Fetching match details: ${matchId}`)
+
+    // Get match info
+    const { data: match, error: matchErr } = await supabase
+      .from('matches')
+      .select('id, share_code, map, played_at, score_team1, score_team2, game_mode, round_history')
+      .eq('id', matchId)
+      .single()
+
+    if (matchErr || !match) return res.status(404).json({ error: 'Match not found' })
+
+    // Get all player stats for this match
+    const { data: stats, error: statsErr } = await supabase
+      .from('player_match_stats')
+      .select('*')
+      .eq('match_id', matchId)
+
+    if (statsErr) {
+      console.error(`[API] ❌ Failed to load stats:`, statsErr)
+      return res.status(500).json({ error: 'Failed to load stats' })
+    }
+
+    console.log(`[API] 📊 Found ${stats?.length || 0} player records for match ${matchId}`)
+    if (stats && stats.length > 0) {
+      console.log(`[API] Team numbers in data:`, Array.from(new Set(stats.map((s: any) => s.team_number))))
+    }
+
+    // Get names/avatars from players + ghost_profiles
+    const steamIds = (stats || []).map((s: any) => s.steam_id).filter(Boolean)
+
+    const { data: registeredPlayers, error: regErr } = await supabase
+      .from('players')
+      .select('steam_id, name, avatar')
+      .in('steam_id', steamIds)
+    
+    if (regErr) console.error(`[API] !! RegisteredPlayers query error:`, regErr)
+
+    const { data: ghostPlayers, error: ghostErr } = await supabase
+      .from('ghost_profiles')
+      .select('steam_id, name, avatar')
+      .in('steam_id', steamIds)
+    
+    if (ghostErr) console.error(`[API] !! GhostPlayers query error:`, ghostErr)
+
+    const profileMap = new Map<string, { name: string, avatar: string | null, registered: boolean }>()
+    for (const p of ghostPlayers || []) {
+      profileMap.set(p.steam_id, { name: p.name, avatar: p.avatar, registered: false })
+    }
+    for (const p of registeredPlayers || []) {
+      profileMap.set(p.steam_id, { name: p.name, avatar: p.avatar, registered: true })
+    }
+
+    // Get TR (Trust Rating) from reputation_scores
+    const { data: reputations } = await supabase
+      .from('reputation_scores')
+      .select('user_id, score')
+      .in('user_id', steamIds)
+    
+    const repMap = new Map<string, number>()
+    for (const r of reputations || []) {
+      repMap.set(r.user_id, r.score)
+    }
+
+    const enrichedStats = (stats || []).map((s: any) => {
+      const profile = profileMap.get(s.steam_id) || { name: 'Unknown', avatar: null, registered: false }
+      return {
+        steamId: s.steam_id,
+        name: profile.name,
+        avatar: profile.avatar,
+        registered: profile.registered,
+        teamNumber: s.team_number,
+        result: s.result,
+        kills: s.kills,
+        deaths: s.deaths,
+        assists: s.assists,
+        headshots: s.headshots,
+        hsPercent: s.hs_percent,
+        adr: s.adr,
+        kd: s.kd,
+        kast: s.kast,
+        rating: s.rating,
+        kills2: s.kills_2 || 0,
+        kills3: s.kills_3 || 0,
+        kills4: s.kills_4 || 0,
+        kills5: s.kills_5 || 0,
+        wallbangKills: s.wallbang_kills || 0,
+        smokeKills: s.smoke_kills || 0,
+        clutch1v1: s.clutch_1v1 || 0,
+        clutch1v2: s.clutch_1v2 || 0,
+        avgTTD: s.avg_time_to_damage,
+        avgReaction: s.avg_reaction_time,
+        preaim: s.preaim_percent,
+        premierRatingAfter: s.premier_rating_after,
+        mvps: s.mvps || 0,
+        tr: repMap.get(s.steam_id) || 100
+      }
+    })
+
+    // Split into teams (using loose equality or Number cast for safety)
+    const team1 = enrichedStats.filter((s: any) => Number(s.teamNumber) === 2).sort((a: any, b: any) => b.rating - a.rating)
+    const team2 = enrichedStats.filter((s: any) => Number(s.teamNumber) === 3).sort((a: any, b: any) => b.rating - a.rating)
+
+    console.log(`[API] 👥 Split: Team1=${team1.length}, Team2=${team2.length}`)
+
+    // If teams are still empty or uneven but we have stats, use a result-based fallback
+    if (enrichedStats.length > 0 && (team1.length === 0 || team2.length === 0)) {
+      console.warn(`[API] ⚠️ Using SMART fallback (Grouping by team_number or result). Total Stats: ${enrichedStats.length}`)
+      
+      let t1 = enrichedStats.filter((s: any) => s.teamNumber === 2)
+      let t2 = enrichedStats.filter((s: any) => s.teamNumber === 3)
+
+      if (t1.length === 0 || t2.length === 0) {
+        // Last resort: group by result
+        const winners = enrichedStats.filter((s: any) => s.result === 'WIN').sort((a: any, b: any) => b.rating - a.rating)
+        const losers = enrichedStats.filter((s: any) => s.result === 'LOSS').sort((a: any, b: any) => b.rating - a.rating)
+        const ties = enrichedStats.filter((s: any) => s.result === 'TIE').sort((a: any, b: any) => b.rating - a.rating)
+        
+        const team1Won = Number(match.score_team1) > Number(match.score_team2)
+        const isTie = Number(match.score_team1) === Number(match.score_team2)
+
+        if (isTie) {
+          // If it's a tie, we just split the ties array in half as we have no better info
+          t1 = ties.slice(0, Math.ceil(ties.length / 2))
+          t2 = ties.slice(Math.ceil(ties.length / 2))
+        } else {
+          t1 = team1Won ? winners : losers
+          t2 = team1Won ? losers : winners
+        }
+      }
+      
+      return res.json({
+        match: {
+          id: match.id,
+          shareCode: match.share_code,
+          map: match.map,
+          playedAt: match.played_at,
+          scoreTeam1: match.score_team1,
+          scoreTeam2: match.score_team2,
+          totalRounds: Number(match.score_team1) + Number(match.score_team2),
+          gameMode: match.game_mode,
+          roundHistory: match.round_history
+        },
+        team1: t1.sort((a: any, b: any) => b.rating - a.rating),
+        team2: t2.sort((a: any, b: any) => b.rating - a.rating)
+      })
+    }
+
+    res.json({
+      match: {
+        id: match.id,
+        shareCode: match.share_code,
+        map: match.map,
+        playedAt: match.played_at,
+        scoreTeam1: match.score_team1,
+        scoreTeam2: match.score_team2,
+        totalRounds: Number(match.score_team1) + Number(match.score_team2),
+        gameMode: match.game_mode,
+        roundHistory: match.round_history
+      },
+      team1,
+      team2
+    })
+  } catch (e: any) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // --- Vite Middleware ---
 async function startServer() {
+  // Ensure Steam Bot is ready before accepting requests
+  try {
+    console.log('[System] 🤖 Initializing Steam Bot...');
+    await initSteamBot();
+    console.log('[System] ✅ Steam Bot ready and stabilized');
+  } catch (err: any) {
+    console.warn('[System] ⚠️ Steam Bot failed to initialize. Demos may be unavailable:', err.message);
+  }
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { 
+        middlewareMode: true,
+        watch: {
+          ignored: (p: string) => p.includes('temp-demos')
+        }
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

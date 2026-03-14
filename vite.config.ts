@@ -16,6 +16,9 @@ export default defineConfig(({mode}) => {
       },
     },
     server: {
+      watch: {
+        ignored: ['**/temp-demos/**'],
+      },
       proxy: {
         '/api': 'http://localhost:3000',
       },

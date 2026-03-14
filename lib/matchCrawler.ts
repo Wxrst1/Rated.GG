@@ -14,7 +14,7 @@ export async function crawlShareCodes(
   const newCodes: string[] = []
   let currentCode = lastShareCode
   let attempts = 0
-  const MAX_ATTEMPTS = 100 // safety limit
+  const MAX_ATTEMPTS = 20 // limit to 20 per sync to avoid pulling years of history
 
   console.log(`[Crawler] Starting crawl for ${steamId} from ${lastShareCode}`)
 
