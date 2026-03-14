@@ -145,7 +145,8 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
     const header = parseHeader(demoPath)
     const map = header.map_name || 'unknown'
     console.log(`[Parser] Match on ${map}`)
-
+    console.log('[Parser] Header keys:', Object.keys(header))
+    console.log('[Parser] Header full:', JSON.stringify(header, null, 2))
     console.log(`[Parser] Extracting death events...`)
     const deaths = parseEvent(demoPath, 'player_death', [], ['penetrated', 'thru_smoke', 'headshot', 'is_warmup_period'])
 
@@ -234,6 +235,10 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
         }
       }
     }
+
+
+
+
 
     const allEvents = [
       ...deaths.map((e: any) => ({ ...e, _type: 'death' })),

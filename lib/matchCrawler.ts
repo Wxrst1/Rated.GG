@@ -6,6 +6,14 @@ const STEAM_API_KEY = process.env.STEAM_API_KEY!
  * Crawls all share codes from Valve API starting from the last known code.
  * Returns array of new share codes found.
  */
+/**
+ * Note: GetMatchList does not exist on the Steam Web API for CS2.
+ * We rely on GetNextMatchSharingCode to find matches and the GC to fetch rankings.
+ */
+export async function syncMatchListWithRatings(steamId: string, authCode: string) {
+  return []; // Returning empty list to avoid 404s
+}
+
 export async function crawlShareCodes(
   steamId: string,
   authCode: string,

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { 
   ThumbsUp, Clock, Trophy, Activity, 
   ShieldAlert, Globe, 
@@ -62,6 +62,7 @@ function StatBar({ label, value, unit, progress, reverseColor = false }: { label
 export default function PlayerProfile() {
   const { steamId } = useParams<{ steamId: string }>();
   const [player, setPlayer] = useState<any>(null);
+  const [me, setMe] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('Overview');
   const [activeSubTab, setActiveSubTab] = useState('CSRep');
@@ -70,8 +71,15 @@ export default function PlayerProfile() {
     const fetchData = async () => {
       setLoading(true);
       try {
-        const playerRes = await fetch(`/api/player/${steamId}`);
+        const [playerRes, meRes] = await Promise.all([
+          fetch(`/api/player/${steamId}`),
+          fetch(`/api/auth/me`)
+        ]);
         if (playerRes.ok) setPlayer(await playerRes.json());
+        if (meRes.ok) {
+           const meData = await meRes.json();
+           setMe(meData.authenticated ? meData.user : null);
+        }
       } catch (error) {
         console.error('Failed to fetch player data', error);
       } finally {
@@ -198,7 +206,8 @@ export default function PlayerProfile() {
                   <div className="flex gap-2 w-full mb-6 z-10 h-12">
                      <div className="flex-1 bg-white/5 rounded flex flex-col items-center justify-center relative overflow-hidden border border-white/5 shadow-inner">
                         <div className="absolute left-0 bottom-0 top-0 w-3 bg-blue-600 skew-x-[-20deg] origin-bottom -ml-1 border-r border-background" />
-                        <span className="font-display text-blue-400 italic text-xl drop-shadow leading-none">{player.premierRating > 0 ? player.premierRating.toLocaleString() : "Unranked"}</span>
+                        <span className="text-[10px] text-muted uppercase font-black tracking-widest relative z-10">Premier Ranking</span>
+                        <span className="text-xl font-display font-black text-white relative z-10">{player.premierRating > 0 ? player.premierRating.toLocaleString() : '---'}</span>
                         {player.worldRank > 0 && (
                            <span className="text-[7px] font-black text-blue-400/40 uppercase tracking-tighter mt-0.5">#{player.worldRank.toLocaleString()} GLOBAL</span>
                         )}
@@ -208,6 +217,33 @@ export default function PlayerProfile() {
                         <span className="font-display text-xl text-accent">{player.faceit?.level || 1}</span>
                      </div>
                   </div>
+
+                  {/* Auth Code Section - Only for own profile */}
+                  {me?.steam_id === player?.steam_id && (
+                    <div className="w-full mb-6 z-10">
+                       <button 
+                          onClick={() => {
+                            const code = prompt("Enter your Steam Match Auth Code to unlock all ratings:");
+                            if (code) {
+                              fetch(`/api/player/${player.steam_id}/auth`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ authCode: code })
+                              }).then(() => window.location.reload());
+                            }
+                          }}
+                          className="w-full py-3 bg-white/5 border border-white/10 rounded-lg text-[10px] uppercase font-black tracking-widest flex items-center justify-center gap-2 hover:bg-white/10 transition-all text-muted hover:text-white"
+                       >
+                          <Settings className="w-3 h-3" />
+                          Update Match Auth Code
+                       </button>
+                       {player.auth_code && (
+                          <div className="mt-2 text-[9px] text-accent/60 uppercase font-bold text-center tracking-tighter">
+                             ✓ Auth Code Active
+                          </div>
+                       )}
+                    </div>
+                  )}
 
                   {/* Medals */}
                   <div className="grid grid-cols-4 gap-2 w-full mb-6 z-10">
@@ -442,9 +478,12 @@ export default function PlayerProfile() {
                                     <span className="text-[9px] font-black uppercase tracking-widest text-accent">Rating</span>
                                     <span className="font-display text-xl text-accent">{m.rating.toFixed(2)}</span>
                                  </div>
-                                 <button className="w-8 h-8 rounded-full border border-white/5 bg-white/5 flex items-center justify-center hover:bg-accent/20 hover:border-accent/40 transition-all">
+                                 <Link 
+                                    to={`/match/${m.id}`}
+                                    className="w-8 h-8 rounded-full border border-white/5 bg-white/5 flex items-center justify-center hover:bg-accent/20 hover:border-accent/40 transition-all cursor-pointer z-20"
+                                 >
                                     <ChevronRight className="w-4 h-4 text-muted group-hover:text-accent" />
-                                 </button>
+                                 </Link>
                               </div>
                            </div>
                         )) : (

@@ -1,4 +1,5 @@
 import 'dotenv/config';
+// Last Update: 2026-03-14T07:45:00Z
 import express from 'express';
 import cors from 'cors';
 import protobuf from 'protobufjs';
@@ -12,7 +13,7 @@ import './lib/matchQueue';
 import { demoQueue, crawlQueue, queueUserSync } from './lib/matchQueue';
 import './lib/cronJobs';
 import { onUserRegister } from './lib/auth';
-import { initSteamBot, getPlayerRating } from './lib/demoDownloader';
+import { initSteamBot, getPlayerRating, isBotReady } from './lib/demoDownloader';
 
 
 // --- Supabase Client Setup ---
@@ -30,6 +31,52 @@ console.log("✅ Supabase & Prisma initialized");
 
 // --- Steam API Setup ---
 const app = express();
+
+app.get('/api/debug/premier/:steamId', async (req, res) => {
+  const { steamId } = req.params;
+  const debugLogs: string[] = [];
+  try {
+     const ready = isBotReady();
+     debugLogs.push(`[Test] Priority test for ${steamId}. Bot ready: ${ready}`);
+     
+     // 1. Try Bot
+     const botResult = await getPlayerRating(steamId);
+     debugLogs.push(`[Test] Bot Result for ${steamId}: ${JSON.stringify(botResult)}`);
+     
+     // 2. Try Match History Fallback
+     const { data: recentMatch } = await supabase
+       .from('player_match_stats')
+       .select('premier_rating_after, matches(played_at)')
+       .eq('steam_id', steamId)
+       .not('premier_rating_after', 'is', null)
+       .order('id', { ascending: false })
+       .limit(1);
+     
+     if (recentMatch?.[0]) {
+        const matchData = recentMatch[0].matches as any;
+        const playedAt = Array.isArray(matchData) ? matchData[0]?.played_at : matchData?.played_at;
+        debugLogs.push(`[Test] Match History Result: ${recentMatch[0].premier_rating_after} (from match at ${playedAt || 'unknown'})`);
+     } else {
+        debugLogs.push(`[Test] No ratings found in match history for ${steamId}`);
+     }
+
+     // 3. Try global player stats RPC
+     const { data: dbStats } = await supabase.rpc('get_player_stats', { p_steam_id: steamId });
+     debugLogs.push(`[Test] DB RPC current_premier_rating: ${dbStats?.[0]?.current_premier_rating || 'null'}`);
+     
+     res.json({ 
+       steamId, 
+       botReady: ready, 
+       botResult,
+       dbResult: dbStats?.[0]?.current_premier_rating || null,
+       matchHistoryResult: recentMatch?.[0]?.premier_rating_after || null,
+       logs: debugLogs 
+     });
+  } catch (e: any) {
+    console.error(`[Test Error] ${e.message}`);
+    res.status(500).json({ error: e.message, botReady: isBotReady(), logs: debugLogs });
+  }
+});
 
 // Debug endpoint for demo analytics queue
 app.get('/api/debug/queue', async (req, res) => {
@@ -553,42 +600,77 @@ async function getSteamPlayer(input: string) {
        .rpc('get_player_stats', { p_steam_id: steamId });
     const dbProfile = dbStats?.[0];
 
-    // 9. TRY WEB API RATING (Suggested by user)
-    let webRating = 0;
-    try {
-      if (STEAM_API_KEY) {
-        const rankRes = await fetch(
-          `https://api.steampowered.com/ICSGOPlayers_730/GetPlayerRankInfo/v1?key=${STEAM_API_KEY}&steamid=${steamId}`
-        );
-        if (rankRes.ok) {
-          const rankData: any = await rankRes.json();
-          webRating = rankData?.result?.ranking?.[0]?.rank_id || 0;
-          if (webRating > 0) console.log(`[WebAPI] 📡 Rating for ${steamId}: ${webRating}`);
-        } else {
-          console.log(`[WebAPI] ⚠️ Failed for ${steamId}: Status ${rankRes.status}`);
-        }
-      }
-    } catch (e) {
-      console.log(`[WebAPI] ❌ Error:`, e);
-    }
+    // 9. TRY LIVE RATING VIA BOT (Targeting the GC directly)
+    let premierRating = 0;
+    let worldRank = 0;
 
-    // 10. TRY LIVE RATING VIA BOT (Targeting the GC directly)
-    let premierRating = dbProfile?.current_premier_rating || webRating || 0;
-    let worldRank = 0; 
+    // Always fetch live rating from bot first for accuracy as requested
+    console.log(`[GC-BOT] 🤖 Attempting live rating fetch via SteamBot for ${steamId}...`);
+    const liveData = await getPlayerRating(steamId).catch(() => null);
     
-    // Always attempt bot if rating is 0, or if we want to double check (optional)
-    if (premierRating === 0) {
-      console.log(`[GC-BOT] 🤖 Attempting live rating fetch via SteamBot for ${steamId}...`);
-      const liveData = await getPlayerRating(steamId);
-      if (liveData) {
-        premierRating = liveData.rating;
-        worldRank = liveData.rank;
-        console.log(`[GC-BOT] ✅ SUCCESS: Found ${premierRating} (#${worldRank})`);
-      } else {
-        console.log(`[GC-BOT] ❌ FAILED: Bot could not retrieve rating for ${steamId}`);
+    if (liveData && liveData.rating > 0) {
+      premierRating = liveData.rating;
+      worldRank = liveData.rank;
+      console.log(`[GC-BOT] ✅ SUCCESS: Found live rating ${premierRating} (#${worldRank})`);
+      
+      // PERSISTENCE: Save this rating to the most recent match so it "sticks" in the DB
+      try {
+        const { data: lastMatch } = await supabase
+          .from('player_match_stats')
+          .select('id')
+          .eq('steam_id', steamId)
+          .order('id', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (lastMatch) {
+          await supabase
+            .from('player_match_stats')
+            .update({ premier_rating_after: premierRating })
+            .eq('id', lastMatch.id);
+          console.log(`[Cache] 💾 Saved live rating ${premierRating} to match history for ${steamId}`);
+        }
+      } catch (saveErr) {
+        console.warn(`[Cache] ⚠️ Could not persist live rating:`, saveErr);
       }
     } else {
-      console.log(`[GC-BOT] 💾 Rating already identified: ${premierRating}`);
+      console.log(`[GC-BOT] ℹ️ Live fetch failed for ${steamId}. Searching match history in DB...`);
+      // Fallback: Check the most recent match record for this player's rating
+      const { data: lastRating } = await supabase
+        .from('player_match_stats')
+        .select('premier_rating_after')
+        .eq('steam_id', steamId)
+        .not('premier_rating_after', 'is', null)
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (lastRating?.premier_rating_after && lastRating.premier_rating_after > 0) {
+        premierRating = lastRating.premier_rating_after;
+        console.log(`[GC-BOT] 📋 SUCCESS: Found rating in DB Match History: ${premierRating}`);
+      } else {
+        // Fallback 3: General player profile cache
+        premierRating = dbProfile?.current_premier_rating || 0;
+        
+        // Fallback 4: Ghost profile cache
+        if (!premierRating || premierRating <= 0) {
+          const { data: ghost } = await supabase
+            .from('ghost_profiles')
+            .select('current_premier_rating')
+            .eq('steam_id', steamId)
+            .maybeSingle();
+          if (ghost?.current_premier_rating && ghost.current_premier_rating > 0) {
+            premierRating = ghost.current_premier_rating;
+            console.log(`[GC-BOT] 👻 SUCCESS: Found rating in Ghost Profile: ${premierRating}`);
+          }
+        }
+        
+        if (premierRating > 0) {
+          console.log(`[GC-BOT] 💾 Using cache fallback: ${premierRating}`);
+        } else {
+          console.log(`[GC-BOT] ❌ No ranking found in any fallback for ${steamId}`);
+        }
+      }
     }
 
     return {
@@ -743,32 +825,27 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
       officialMatches = await fetchSteamMatches(steamId, player.auth_code);
     }
 
-    // Resolve real match steam ID — profile ID may differ from demo ID
+    // Resolve real match steam ID
     let matchSteamId = steamId;
-    const { data: shareCodeRow } = await supabase
-      .from('user_share_codes')
-      .select('steam_id')
-      .eq('steam_id', steamId)
-      .limit(1)
-      .maybeSingle();
+    
+    // Check if we have data for this SteamID in our stats
+    const { count: statsCount } = await supabase
+      .from('player_match_stats')
+      .select('id', { count: 'exact', head: true })
+      .eq('steam_id', steamId);
 
-    if (!shareCodeRow) {
+    if (!statsCount || statsCount === 0) {
+      // If we don't have matches for the ID, maybe we have them under a ghost name?
+      // (Legacy fallback, but let's keep it scoped to real ID primarily)
       const { data: ghostRow } = await supabase
         .from('ghost_profiles')
         .select('steam_id')
-        .ilike('name', steamData.name)
-        .limit(1)
+        .eq('steam_id', steamId) // Direct ID match is best
         .maybeSingle();
 
       if (ghostRow) {
-        const { count } = await supabase
-          .from('player_match_stats')
-          .select('match_id', { count: 'exact', head: true })
-          .eq('steam_id', ghostRow.steam_id);
-        if (count && count > 0) {
-          matchSteamId = ghostRow.steam_id;
-          console.log(`[Profile] Resolved ${steamId} → ${matchSteamId} via ghost name match`);
-        }
+        matchSteamId = ghostRow.steam_id;
+        console.log(`[Profile] Resolved ${steamId} via Ghost Profile`);
       }
     }
 
@@ -776,7 +853,7 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
 
     const { data: dbMatches, error: dbMatchError } = await supabase
        .from('player_match_stats')
-       .select('match_id, result, kills, deaths, assists, adr, headshots, rating, matches(map, played_at, score_team1, score_team2)')
+       .select('match_id, result, kills, deaths, assists, adr, headshots, rating, premier_rating_after, matches(map, played_at, score_team1, score_team2, match_id)')
        .order('id', { ascending: false })
        .eq('steam_id', matchSteamId)
        .limit(100);
@@ -797,6 +874,7 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
        assists: dbm.assists,
        adr: dbm.adr,
        rating: dbm.rating || (dbm as any).matches?.rating || 0,
+       premierRating: dbm.premier_rating_after,
        hs: `${dbm.headshots}%`,
        source: 'INTERNAL'
     }));
@@ -854,6 +932,7 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
 
     res.json({
       steamId: steamId,
+      auth_code: !!(player as any)?.auth_code,
       name: steamData.name,
       avatar: steamData.avatar,
       isBanned: steamData.isBanned,
@@ -866,7 +945,7 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
           url: steamData.faceit.url
       } : null,
       level: steamData.steamLevel || 1,
-      premierRating: dbProfile?.current_premier_rating || steamData.premierRating || 0,
+      premierRating: steamData.premierRating || 0,
       worldRank: steamData.worldRank || 0,
       leetifyRating: (finalStats.rating - 1).toFixed(2),
       inventoryValue: steamData.computedStats?.inventoryValue || "Private",
@@ -987,6 +1066,39 @@ app.get('/api/search/preview', async (req, res) => {
 });
 
 // --- Remaining Routes ---
+
+// Update Match Auth Code
+app.post('/api/player/:steamId/auth', express.json(), async (req: any, res) => {
+  const { steamId } = req.params;
+  const { authCode } = req.body;
+
+  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Unauthorized' });
+  const loggedInSteamId = req.user.id || req.user._json?.steamid;
+  
+  if (loggedInSteamId !== steamId) {
+    return res.status(403).json({ error: 'You can only update your own Auth Code' });
+  }
+
+  if (!authCode) return res.status(400).json({ error: "Auth Code required" });
+
+  try {
+    const { error } = await supabase
+      .from('players')
+      .update({ auth_code: authCode, auth_code_valid: true })
+      .eq('steam_id', steamId);
+
+    if (error) throw error;
+    
+    // Trigger a crawl of the matches with the new auth code
+    console.log(`[Auth] 🔑 Triggering sync for ${steamId} with new Auth Code`);
+    queueUserSync(steamId, authCode, ""); // Force a deep sync
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("❌ Auth update error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Get player reviews (Simplified query to avoid relationship errors)
 app.get('/api/player/:idOrVanity/reviews', async (req, res) => {
@@ -1335,54 +1447,35 @@ app.get('/api/matches/:matchId', async (req, res) => {
       }
     })
 
-    // Split into teams (using loose equality or Number cast for safety)
-    const team1 = enrichedStats.filter((s: any) => Number(s.teamNumber) === 2).sort((a: any, b: any) => b.rating - a.rating)
-    const team2 = enrichedStats.filter((s: any) => Number(s.teamNumber) === 3).sort((a: any, b: any) => b.rating - a.rating)
+    // Split into teams
+    // Team 1 is usually T (2), Team 2 is usually CT (3)
+    let team1 = enrichedStats.filter((s: any) => Number(s.teamNumber) === 2).sort((a: any, b: any) => b.rating - a.rating)
+    let team2 = enrichedStats.filter((s: any) => Number(s.teamNumber) === 3).sort((a: any, b: any) => b.rating - a.rating)
 
-    console.log(`[API] 👥 Split: Team1=${team1.length}, Team2=${team2.length}`)
+    console.log(`[API] 👥 Initial Split: T1=${team1.length}, T2=${team2.length}`)
 
-    // If teams are still empty or uneven but we have stats, use a result-based fallback
-    if (enrichedStats.length > 0 && (team1.length === 0 || team2.length === 0)) {
-      console.warn(`[API] ⚠️ Using SMART fallback (Grouping by team_number or result). Total Stats: ${enrichedStats.length}`)
+    // If teams are empty or all in one team, try a smarter split
+    if (team1.length === 0 || team2.length === 0) {
+      console.log(`[API] ⚠️ Standard team IDs (2/3) missing. Detecting unique teams...`)
+      const uniqueTeams = Array.from(new Set(enrichedStats.map((s: any) => Number(s.teamNumber)))).filter(t => t > 0);
       
-      let t1 = enrichedStats.filter((s: any) => s.teamNumber === 2)
-      let t2 = enrichedStats.filter((s: any) => s.teamNumber === 3)
-
-      if (t1.length === 0 || t2.length === 0) {
-        // Last resort: group by result
-        const winners = enrichedStats.filter((s: any) => s.result === 'WIN').sort((a: any, b: any) => b.rating - a.rating)
-        const losers = enrichedStats.filter((s: any) => s.result === 'LOSS').sort((a: any, b: any) => b.rating - a.rating)
-        const ties = enrichedStats.filter((s: any) => s.result === 'TIE').sort((a: any, b: any) => b.rating - a.rating)
+      if (uniqueTeams.length >= 2) {
+        team1 = enrichedStats.filter((s: any) => Number(s.teamNumber) === uniqueTeams[0]).sort((a: any, b: any) => b.rating - a.rating)
+        team2 = enrichedStats.filter((s: any) => Number(s.teamNumber) === uniqueTeams[1]).sort((a: any, b: any) => b.rating - a.rating)
+      } else {
+        // Fallback: group by result
+        team1 = enrichedStats.filter((s: any) => s.result === 'WIN').sort((a: any, b: any) => b.rating - a.rating)
+        team2 = enrichedStats.filter((s: any) => s.result === 'LOSS' || s.result === 'TIE').sort((a: any, b: any) => b.rating - a.rating)
         
-        const team1Won = Number(match.score_team1) > Number(match.score_team2)
-        const isTie = Number(match.score_team1) === Number(match.score_team2)
-
-        if (isTie) {
-          // If it's a tie, we just split the ties array in half as we have no better info
-          t1 = ties.slice(0, Math.ceil(ties.length / 2))
-          t2 = ties.slice(Math.ceil(ties.length / 2))
-        } else {
-          t1 = team1Won ? winners : losers
-          t2 = team1Won ? losers : winners
+        // Final fallback: split in half
+        if (team1.length === 0 || team2.length === 0) {
+          team1 = enrichedStats.slice(0, Math.ceil(enrichedStats.length / 2))
+          team2 = enrichedStats.slice(Math.ceil(enrichedStats.length / 2))
         }
       }
-      
-      return res.json({
-        match: {
-          id: match.id,
-          shareCode: match.share_code,
-          map: match.map,
-          playedAt: match.played_at,
-          scoreTeam1: match.score_team1,
-          scoreTeam2: match.score_team2,
-          totalRounds: Number(match.score_team1) + Number(match.score_team2),
-          gameMode: match.game_mode,
-          roundHistory: match.round_history
-        },
-        team1: t1.sort((a: any, b: any) => b.rating - a.rating),
-        team2: t2.sort((a: any, b: any) => b.rating - a.rating)
-      })
     }
+
+    console.log(`[API] ✅ Final Split: Team1=${team1.length}, Team2=${team2.length}`)
 
     res.json({
       match: {
@@ -1396,8 +1489,8 @@ app.get('/api/matches/:matchId', async (req, res) => {
         gameMode: match.game_mode,
         roundHistory: match.round_history
       },
-      team1,
-      team2
+      team1: team1.sort((a: any, b: any) => (b.rating || 0) - (a.rating || 0)),
+      team2: team2.sort((a: any, b: any) => (b.rating || 0) - (a.rating || 0))
     })
   } catch (e: any) {
     res.status(500).json({ error: e.message })

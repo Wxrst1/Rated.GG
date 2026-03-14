@@ -1,11 +1,13 @@
 import SteamUser from 'steam-user'
 import GlobalOffensive from 'globaloffensive'
 import { createWriteStream, mkdirSync, existsSync, unlinkSync, promises as fsPromises } from 'fs'
+import fs from 'fs'
 import path from 'path'
 import https from 'https'
 import http from 'http'
 import unbzip2 from 'unbzip2-stream' // Modern import since it's in package.json
 import { decodeMatchShareCode } from 'csgo-sharecode'
+import SteamID from 'steamid'
 
 export interface DemoInfo {
   demoUrl: string
@@ -129,6 +131,17 @@ export async function getDemoInfo(shareCode: string): Promise<DemoInfo | null> {
         if (match) {
           csgo.removeListener('matchList', handler)
           clearTimeout(timeout)
+          
+          // DEBUG: Dump full match structure to inspect where rankings are
+          try {
+            fs.writeFileSync(path.join(process.cwd(), 'debug_gc_match.json'), JSON.stringify(match, (key, value) =>
+              typeof value === 'bigint' ? value.toString() : value, 2));
+          } catch(e) {}
+
+          console.log(`[Bot] FULL MATCH info received for ${matchIdStr}`)
+          if (match.roundstats_legacy) {
+            console.log(`[Bot] roundstats_legacy info:`, JSON.stringify(match.roundstats_legacy, null, 2));
+          }
 
           const rounds = match.roundstatsall || []
           const lastRound = rounds[rounds.length - 1]
@@ -158,19 +171,55 @@ export async function getDemoInfo(shareCode: string): Promise<DemoInfo | null> {
           
           console.log(`[Bot] Results from GC: ${scoreTeam1}-${scoreTeam2} Mode: ${gameMode} (Players: ${numPlayers}, MaxRounds: ${maxRounds})`)
 
-          // Extract Premier ratings if available
+          // Extract Premier ratings for ALL 10 players
           const premierRatings: Record<string, number> = {}
           const playerStats = match.player_stats || []
-          playerStats.forEach((ps: any) => {
-            const rank = ps.rank || ps.premier_rating || ps.rating || 0
-            if (ps.accountid && rank > 0 && rank < 40000) {
-              const sid = BigInt(ps.accountid) + 76561197960265728n
-              premierRatings[sid.toString()] = rank
+          
+          // 1. Try extracting from player_stats
+          playerStats.forEach((ps: any, index: number) => {
+            const accountId = ps.accountid
+            const rank = Number(ps.rank || ps.premier_rating || 0)
+            if (accountId && rank > 0) {
+              const sid = (BigInt(accountId) + 76561197960265728n).toString()
+              if (rank > 100) premierRatings[sid] = rank
             }
           })
           
+          // 2. Try extracting from RICH rankings in reservation (Best for CS2)
+          if (lastRound?.reservation?.rankings) {
+            console.log(`[Bot] Found RICH rankings in reservation: ${lastRound.reservation.rankings.length} entries`);
+            lastRound.reservation.rankings.forEach((r: any) => {
+              if (r.account_id && r.rank_type_id === 11 && r.rank_id > 0) {
+                const sid = (BigInt(r.account_id) + 76561197960265728n).toString()
+                premierRatings[sid] = r.rank_id
+              }
+            });
+          }
+          
           if (Object.keys(premierRatings).length > 0) {
-            console.log(`[Bot] 📊 Extracted ${Object.keys(premierRatings).length} Premier ratings`)
+            console.log(`[Bot] 📊 Captured Premier ratings for ${Object.keys(premierRatings).length} players in match ${matchIdStr}`)
+          }
+
+          // Try requestPlayersProfile with account_ids from reservation
+          const reservationAccountIds = lastRound.reservation?.account_ids || []
+          if (reservationAccountIds.length > 0) {
+            console.log(`[Bot] 🔍 Probing GC profiles for ${reservationAccountIds.length} players...`)
+            // Only probe the FIRST one to see if we get ANY response (avoid spamming GC)
+            const id = reservationAccountIds[0]
+            try {
+              const steamId64 = (BigInt(id) + 76561197960265728n).toString()
+              const sid = new SteamID(steamId64)
+              console.log(`[Bot] Testing Probe for: ${steamId64}`)
+              csgo.requestPlayersProfile(sid, (data: any) => {
+                if (data?.rankings) {
+                  console.log(`[Bot] ✅ PROBE DATA for ${steamId64}:`, JSON.stringify(data.rankings, null, 2))
+                } else {
+                  console.log(`[Bot] ❌ PROBE returned no rankings for ${steamId64}`)
+                }
+              })
+            } catch (e: any) {
+              console.log(`[Bot] Probe error:`, e.message)
+            }
           }
 
           console.log(`[Bot] ✅ Found Demo: ${mapName} ${scoreTeam1}-${scoreTeam2} (Ratings: ${Object.keys(premierRatings).length})`)
@@ -210,25 +259,27 @@ export async function getPlayerRating(steamId64: string): Promise<{ rating: numb
 
     const timeout = setTimeout(() => {
       if (!resolved) {
-        console.log(`[Bot] ⏳ Timeout fetching rating for ${steamId64}`);
+        console.log(`[Bot] ⏳ Timeout fetching rating for ${steamId64} (GC usually ignores non-friends)`);
         resolved = true;
         resolve(null);
       }
-    }, 15000);
+    }, 8000);
 
     try {
       // Use requestPlayersProfile - it handles SteamID64 strings directly
-      csgo.requestPlayersProfile(steamId64, (data: any) => {
+      const sid = new SteamID(steamId64)
+      csgo.requestPlayersProfile(sid, (data: any) => {
         if (resolved) return;
         
-        console.log(`[Bot] 📡 Received Profile Data for ${steamId64}`);
+        console.log(`[Bot] 📡 Received Profile Data for ${steamId64}:`, JSON.stringify(data, null, 2));
         
         // Detailed check for CS2 rankings
         let rating = 0;
         let rank = 0;
 
         if (data?.rankings && Array.isArray(data.rankings)) {
-          const premier = data.rankings.find((r: any) => r.rank_type_id === 6);
+          // CS2 Premier is type 11. Type 6 was CS:GO.
+          const premier = data.rankings.find((r: any) => r.rank_type_id === 11 || r.rank_type_id === 6);
           if (premier) {
             rating = premier.rank_id || 0;
             rank = premier.world_rank || 0;

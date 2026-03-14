@@ -135,13 +135,16 @@ export async function saveMatch(
         .eq('steam_id', player.steamId)
         .single()
 
+      const currentRating = premierRatings?.[player.steamId] || null;
+
       if (existing) {
         await supabase
           .from('ghost_profiles')
           .update({
             name: player.name,
             last_seen: parsed.playedAt.toISOString(),
-            total_matches: existing.total_matches + 1
+            total_matches: existing.total_matches + 1,
+            current_premier_rating: currentRating || undefined // Only update if we have a new one
           })
           .eq('steam_id', player.steamId)
       } else {
@@ -152,7 +155,8 @@ export async function saveMatch(
             name: player.name,
             total_matches: 1,
             first_seen: parsed.playedAt.toISOString(),
-            last_seen: parsed.playedAt.toISOString()
+            last_seen: parsed.playedAt.toISOString(),
+            current_premier_rating: currentRating
           })
       }
     }
@@ -232,6 +236,7 @@ async function updatePlayerSummary(steamId: string): Promise<void> {
         avg_crosshair: s.avg_crosshair || 0,
         avg_preaim: s.avg_preaim || 0,
         avg_rating: s.avg_rating || 0,
+        current_premier_rating: Number(s.latest_premier_rating) || 0,
         total_matches: totalMatches,
         wins: wins,
         losses: Number(s.losses) || 0,
