@@ -66,6 +66,8 @@ export default function PlayerProfile() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('Overview');
   const [activeSubTab, setActiveSubTab] = useState('CSRep');
+  
+  const isLoggedIn = useMemo(() => me && me.steam_id, [me]);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -219,7 +221,7 @@ export default function PlayerProfile() {
                   </div>
 
                   {/* Auth Code Section - Only for own profile */}
-                  {me?.steam_id === player?.steam_id && (
+                  {isLoggedIn && me.steam_id === player?.steam_id && (
                     <div className="w-full mb-6 z-10">
                        <button 
                           onClick={() => {
@@ -235,7 +237,7 @@ export default function PlayerProfile() {
                           className="w-full py-3 bg-white/5 border border-white/10 rounded-lg text-[10px] uppercase font-black tracking-widest flex items-center justify-center gap-2 hover:bg-white/10 transition-all text-muted hover:text-white"
                        >
                           <Settings className="w-3 h-3" />
-                          Update Match Auth Code
+                          Update My Match Auth Code
                        </button>
                        {player.auth_code && (
                           <div className="mt-2 text-[9px] text-accent/60 uppercase font-bold text-center tracking-tighter">

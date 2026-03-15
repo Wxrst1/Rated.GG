@@ -1430,6 +1430,7 @@ app.get('/api/matches/:matchId', async (req, res) => {
         kd: s.kd,
         kast: s.kast,
         rating: s.rating,
+        premierRatingAfter: s.premier_rating_after,
         kills2: s.kills_2 || 0,
         kills3: s.kills_3 || 0,
         kills4: s.kills_4 || 0,
@@ -1441,7 +1442,6 @@ app.get('/api/matches/:matchId', async (req, res) => {
         avgTTD: s.avg_time_to_damage,
         avgReaction: s.avg_reaction_time,
         preaim: s.preaim_percent,
-        premierRatingAfter: s.premier_rating_after,
         mvps: s.mvps || 0,
         tr: repMap.get(s.steam_id) || 100
       }

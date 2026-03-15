@@ -126,7 +126,7 @@ export async function getDemoInfo(shareCode: string): Promise<DemoInfo | null> {
         resolve(null)
       }, 25000)
 
-      function handler(matches: any[]) {
+      async function handler(matches: any[]) {
         const match = matches?.find(m => m.matchid?.toString() === matchIdStr)
         if (match) {
           csgo.removeListener('matchList', handler)
@@ -200,26 +200,29 @@ export async function getDemoInfo(shareCode: string): Promise<DemoInfo | null> {
             console.log(`[Bot] 📊 Captured Premier ratings for ${Object.keys(premierRatings).length} players in match ${matchIdStr}`)
           }
 
-          // Try requestPlayersProfile with account_ids from reservation
+          // Try requestPlayersProfile for ALL players in match
           const reservationAccountIds = lastRound.reservation?.account_ids || []
           if (reservationAccountIds.length > 0) {
-            console.log(`[Bot] 🔍 Probing GC profiles for ${reservationAccountIds.length} players...`)
-            // Only probe the FIRST one to see if we get ANY response (avoid spamming GC)
-            const id = reservationAccountIds[0]
-            try {
-              const steamId64 = (BigInt(id) + 76561197960265728n).toString()
-              const sid = new SteamID(steamId64)
-              console.log(`[Bot] Testing Probe for: ${steamId64}`)
-              csgo.requestPlayersProfile(sid, (data: any) => {
-                if (data?.rankings) {
-                  console.log(`[Bot] ✅ PROBE DATA for ${steamId64}:`, JSON.stringify(data.rankings, null, 2))
-                } else {
-                  console.log(`[Bot] ❌ PROBE returned no rankings for ${steamId64}`)
-                }
-              })
-            } catch (e: any) {
-              console.log(`[Bot] Probe error:`, e.message)
-            }
+            console.log(`[Bot] 🔍 Probing GC profiles for ${reservationAccountIds.length} players to find missing ranks...`)
+            reservationAccountIds.forEach((id: any) => {
+              try {
+                const steamId64 = (BigInt(id) + 76561197960265728n).toString()
+                if (premierRatings[steamId64]) return; // Skip if already have it
+
+                const sid = new SteamID(steamId64)
+                csgo.requestPlayersProfile(sid, (data: any) => {
+                  if (data?.rankings) {
+                    const premier = data.rankings.find((r: any) => r.rank_type_id === 11);
+                    if (premier && premier.rank_id > 0) {
+                      premierRatings[steamId64] = premier.rank_id;
+                      console.log(`[Bot] ✅ PROBE SUCCESS for ${steamId64}: ${premier.rank_id}`);
+                    }
+                  }
+                });
+              } catch (e: any) {}
+            });
+            // Give it 5 seconds for probes to complete
+            await new Promise(r => setTimeout(r, 5000));
           }
 
           console.log(`[Bot] ✅ Found Demo: ${mapName} ${scoreTeam1}-${scoreTeam2} (Ratings: ${Object.keys(premierRatings).length})`)
