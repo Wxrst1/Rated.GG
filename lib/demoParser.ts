@@ -210,9 +210,6 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
       const t = Number(team)
       if (t === 2 || t === 3) {
           p.teamNumber = t
-          if (!playerGroup.has(steamId)) {
-              playerGroup.set(steamId, t === 2 ? 0 : 1)
-          }
       }
       
       return p
@@ -313,12 +310,14 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
               
               // Assign group based on their first team after match start if not already set
               if (!playerGroup.has(sid)) {
-                  const g = team === 2 ? 0 : 1
-                  playerGroup.set(sid, g)
-                  // Use first T-side player to determine groupOnTSide
-                  if (groupOnTSide === -1 && team === 2) groupOnTSide = g
-                  else if (groupOnTSide === -1 && team === 3) groupOnTSide = g === 0 ? 1 : 0
-                  console.log(`[Parser] -> Late Assignment: Player ${p.name} (${sid}) assigned to Group ${g} based on team ${team}`)
+                  let g = -1
+                  if (team === 2) g = groupOnTSide
+                  else if (team === 3) g = groupOnTSide === 0 ? 1 : 0
+
+                  if (g !== -1) {
+                    playerGroup.set(sid, g)
+                    console.log(`[Parser] -> Late Assignment: Player ${p.name} (${sid}) assigned to Group ${g} based on team ${team} (CurrentT: ${groupOnTSide})`)
+                  }
               } else {
                   console.log(`[Parser] Side Swap: Player ${p.name} (${sid}) is now on team ${team}`)
               }
@@ -590,17 +589,19 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
     
     // Safety Fallback: If no one has a team, assign teams based on player instances
     const playersArr = Array.from(players.values())
-    const teamless = playersArr.filter(p => p.teamNumber <= 1)
-    if (teamless.length > 0) {
-        console.log(`[Parser] ⚠️ ${teamless.length} players missing teams. Assigning default groups...`)
-        playersArr.forEach((p, idx) => {
-            if (p.teamNumber <= 1) p.teamNumber = idx < 5 ? 2 : 3
-            // Also try to set original team if not already set
-            if (p.steamId && p.steamId !== '0' && p.teamNumber > 1 && !playerGroup.has(p.steamId)) {
-              playerGroup.set(p.steamId, p.teamNumber === 2 ? 0 : 1)
+    playersArr.forEach((p, idx) => {
+        if (p.steamId && p.steamId !== '0' && !playerGroup.has(p.steamId)) {
+            // Assign based on current side and who is T right now
+            if (p.teamNumber === 2) {
+              playerGroup.set(p.steamId, groupOnTSide)
+            } else if (p.teamNumber === 3) {
+              playerGroup.set(p.steamId, groupOnTSide === 0 ? 1 : 0)
+            } else {
+              // Total fallback
+              playerGroup.set(p.steamId, idx < playersArr.length / 2 ? 0 : 1)
             }
-        })
-    }
+        }
+    })
 
     console.log(`[Parser] Summary: ${totalRoundsPlayed} rounds. Final Score: ${scoreGroupA}-${scoreGroupB} (Team A - Team B)`)
 

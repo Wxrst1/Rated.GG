@@ -864,25 +864,31 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
     console.log(`[Profile] Found ${dbMatches?.length || 0} matches in DB`);
 
     const internalizedMatches = (dbMatches || []).map((dbm: any) => {
-       const isGroup0 = dbm.team_group !== null 
-         ? dbm.team_group === 0 
-         : (dbm.result === 'WIN' ? Number(dbm.matches?.score_team1) > Number(dbm.matches?.score_team2) : Number(dbm.matches?.score_team1) < Number(dbm.matches?.score_team2));
+       const teamGroup = dbm.team_group !== null ? dbm.team_group : -1;
        const s1 = dbm.matches?.score_team1 || 0;
        const s2 = dbm.matches?.score_team2 || 0;
+       
+       // Calculate result robustly if it's missing or if we want to confirm
+       let calculatedResult = dbm.result;
+       if (s1 === s2) calculatedResult = 'TIE';
+       else if (teamGroup === 0) calculatedResult = s1 > s2 ? 'WIN' : 'LOSS';
+       else if (teamGroup === 1) calculatedResult = s2 > s1 ? 'WIN' : 'LOSS';
+
+       const isGroup0Display = teamGroup === 0 || (teamGroup === -1 && calculatedResult === 'WIN' ? s1 > s2 : s2 > s1);
        
        return {
           id: dbm.match_id,
           map: dbm.matches?.map || 'Unknown Map',
           time: dbm.matches?.played_at ? new Date(dbm.matches.played_at).getTime() / 1000 : 0,
-          result: dbm.result,
-          score: isGroup0 ? `${s1}-${s2}` : `${s2}-${s1}`,
+          result: calculatedResult,
+          score: isGroup0Display ? `${s1}-${s2}` : `${s2}-${s1}`,
           kills: dbm.kills,
           deaths: dbm.deaths,
           assists: dbm.assists,
           adr: dbm.adr,
           rating: dbm.rating || (dbm as any).matches?.rating || 0,
           premierRating: dbm.premier_rating_after,
-          hs: `${dbm.headshots}%`,
+          hs: `${dbm.hs_percent || 0}%`,
           source: 'INTERNAL'
        };
     });
@@ -1415,22 +1421,29 @@ app.get('/api/matches/:matchId', async (req, res) => {
     if (ghostErr) console.error(`[API] !! GhostPlayers query error:`, ghostErr)
 
     const profileMap = new Map<string, { name: string, avatar: string | null, registered: boolean }>()
-    const idsToEnrich: string[] = []
+    const idsToEnrich = new Set<string>()
 
+    // Track what we found
     for (const p of ghostPlayers || []) {
       profileMap.set(p.steam_id, { name: p.name, avatar: p.avatar, registered: false })
-      if (!p.avatar || p.name === 'Unknown') idsToEnrich.push(p.steam_id)
+      if (!p.avatar || !p.name || p.name === 'Unknown') idsToEnrich.add(p.steam_id)
     }
     for (const p of registeredPlayers || []) {
       profileMap.set(p.steam_id, { name: p.name, avatar: p.avatar, registered: true })
-      if (!p.avatar || p.name === 'Unknown') idsToEnrich.push(p.steam_id)
+      if (!p.avatar || !p.name || p.name === 'Unknown') idsToEnrich.add(p.steam_id)
+    }
+
+    // Add any IDs that aren't in either table yet (shouldn't happen but as a safety measure)
+    for (const sid of steamIds) {
+      if (!profileMap.has(sid)) idsToEnrich.add(sid)
     }
 
     // Proactive enrichment if data missing during view
-    if (idsToEnrich.length > 0 && STEAM_API_KEY) {
-       console.log(`[API] 🩺 Self-healing ${idsToEnrich.length} missing profiles for match ${matchId}...`)
+    if (idsToEnrich.size > 0 && STEAM_API_KEY) {
+       const toEnrich = Array.from(idsToEnrich)
+       console.log(`[API] 🩺 Self-healing ${toEnrich.length} missing/incomplete profiles for match ${matchId}...`)
        try {
-          const res = await fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${STEAM_API_KEY}&steamids=${idsToEnrich.join(',')}`)
+          const res = await fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${STEAM_API_KEY}&steamids=${toEnrich.join(',')}`)
           const data = await res.json()
           const players = data?.response?.players || []
           for (const sp of players) {
@@ -1459,7 +1472,7 @@ app.get('/api/matches/:matchId', async (req, res) => {
     }
 
     const enrichedStats = (stats || []).map((s: any) => {
-      const profile = profileMap.get(s.steam_id) || { name: 'Unknown', avatar: null, registered: false }
+      const profile = profileMap.get(s.steam_id) || { name: `Player_${s.steam_id.substring(13)}`, avatar: null, registered: false }
       return {
         steamId: s.steam_id,
         name: profile.name,
