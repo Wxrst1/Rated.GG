@@ -3,8 +3,8 @@ import { useParams, Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Trophy, Crosshair, Target, Clock, Activity, 
-  ChevronLeft, Layout, Zap, Flame, Shield,
-  Wind, Ghost, ShieldCheck, Settings, Users,
+  ChevronLeft, Layout, Zap, Flame,
+  Wind, Ghost, Settings, Users,
   BarChart3, Info, Star, Share2, Play, Video,
   Calendar, MapPin, Globe, ArrowRight, MousePointer2
 } from 'lucide-react';
@@ -201,18 +201,25 @@ export default function MatchDetail() {
                   <div className="flex flex-col md:flex-row md:items-end justify-between gap-12">
                      <div className="flex items-center gap-12">
                         <div className="text-center">
-                           <span className="text-[11px] font-black font-mono text-accent block mb-2">SCORE_ALPHA</span>
+                           <span className="text-[11px] font-black font-mono text-accent block mb-2">TEAM A</span>
                            <h2 className={cn("text-9xl font-display italic leading-none", match.scoreTeam1 > match.scoreTeam2 ? "text-white text-glow" : "text-white/20")}>
                               {match.scoreTeam1}
                            </h2>
                         </div>
-                        <div className="flex flex-col items-center opacity-20">
-                           <div className="h-12 w-px bg-white/40 mb-2" />
-                           <span className="font-display italic text-2xl">VS</span>
-                           <div className="h-12 w-px bg-white/40 mt-2" />
+                        <div className="flex flex-col items-center gap-4">
+                           <div className="h-10 w-px bg-white/20" />
+                           <div className={cn(
+                              "px-6 py-2 rounded-full border text-[10px] font-black uppercase tracking-[0.3em] shadow-lg",
+                              match.scoreTeam1 > match.scoreTeam2 ? "bg-accent/10 border-accent/40 text-accent" :
+                              match.scoreTeam2 > match.scoreTeam1 ? "bg-danger/10 border-danger/40 text-danger" :
+                              "bg-white/5 border-white/20 text-white/40"
+                           )}>
+                              {match.scoreTeam1 > match.scoreTeam2 ? 'WIN' : match.scoreTeam2 > match.scoreTeam1 ? 'LOSS' : 'DRAW'}
+                           </div>
+                           <div className="h-10 w-px bg-white/20" />
                         </div>
                         <div className="text-center">
-                           <span className="text-[11px] font-black font-mono text-white/20 block mb-2">SCORE_BRAVO</span>
+                           <span className="text-[11px] font-black font-mono text-white/20 block mb-2">TEAM B</span>
                            <h2 className={cn("text-9xl font-display italic leading-none", match.scoreTeam2 > match.scoreTeam1 ? "text-white text-glow" : "text-white/20")}>
                               {match.scoreTeam2}
                            </h2>
@@ -223,6 +230,15 @@ export default function MatchDetail() {
                         <StatBadge icon={<Clock />} label="DURATION" value="34:12" />
                         <StatBadge icon={<Globe />} label="REGION" value="EU_WEST_2" />
                         <StatBadge icon={<Activity />} label="MATCH_AVG" value="10,405" />
+                        <button 
+                           onClick={async () => {
+                              const res = await fetch(`/api/matches/${matchId}/reparse`, { method: 'POST' });
+                              if (res.ok) alert('Match queued for re-analysis. Refresh in a few moments.');
+                           }}
+                           className="px-8 py-3.5 bg-accent/10 border border-accent/20 rounded-xl hover:bg-accent/20 transition-all text-[10px] font-black uppercase tracking-widest text-accent flex items-center gap-3"
+                        >
+                           <Settings className="w-4 h-4" /> Re-Analyze
+                        </button>
                         <button className="px-8 py-3.5 bg-white/5 border border-white/10 rounded-xl hover:bg-white/10 transition-all text-[10px] font-black uppercase tracking-widest flex items-center gap-3">
                            <Share2 className="w-4 h-4" /> Share
                         </button>
@@ -274,6 +290,7 @@ export default function MatchDetail() {
                     score={match.scoreTeam1} 
                     isWinner={match.scoreTeam1 > match.scoreTeam2} 
                     totalRounds={match.scoreTeam1 + match.scoreTeam2}
+                    currentUser={currentUser}
                   />
                   
                   {/* ROUND TIMELINE */}
@@ -302,6 +319,7 @@ export default function MatchDetail() {
                     score={match.scoreTeam2} 
                     isWinner={match.scoreTeam2 > match.scoreTeam1} 
                     totalRounds={match.scoreTeam1 + match.scoreTeam2}
+                    currentUser={currentUser}
                   />
                </motion.div>
             )}
@@ -313,8 +331,8 @@ export default function MatchDetail() {
                  animate={{ opacity: 1 }}
                  className="space-y-40"
                >
-                  <PlayerGrid teamName="Alpha Protocol" players={match.team1} accent="gold" />
-                  <PlayerGrid teamName="Bravo Protocol" players={match.team2} accent="indigo" />
+                  <PlayerGrid teamName="TEAM A" players={match.team1} accent="gold" />
+                  <PlayerGrid teamName="TEAM B" players={match.team2} accent="indigo" />
                </motion.div>
             )}
 
@@ -332,10 +350,10 @@ export default function MatchDetail() {
                               <div className="flex items-center gap-10">
                                  <span className="text-[10px] font-mono text-white/10 uppercase tracking-widest font-black">R-ID_{i+1 < 10 ? `0${i+1}` : i+1}</span>
                                  <div className={cn(
-                                    "w-10 h-10 rounded-xl flex items-center justify-center border transition-all",
+                                    "px-4 h-10 rounded-xl flex items-center justify-center border transition-all",
                                     r.winnerGroup === 0 ? "border-accent/40 bg-accent/10 text-accent" : "border-blue-500/40 bg-blue-500/10 text-blue-500"
                                  )}>
-                                    <span className="text-sm font-black italic">{r.winnerGroup === 0 ? 'A' : 'B'}</span>
+                                    <span className="text-[10px] font-black italic tracking-widest">{r.winnerGroup === 0 ? 'TEAM A' : 'TEAM B'}</span>
                                  </div>
                                  <div>
                                     <div className="flex items-center gap-4">
@@ -391,7 +409,7 @@ export default function MatchDetail() {
                   <div className="glass-heavy rounded-[3rem] p-16 border border-white/5 flex flex-col items-center">
                      <h3 className="text-[11px] font-black text-accent uppercase tracking-[1em] mb-12">Hit Distribution Mapping</h3>
                      <div className="relative w-full max-w-sm aspect-[1/2] rounded-[4rem] border border-white/5 bg-white/[0.02] flex items-center justify-center">
-                        <Users className="w-64 h-64 text-white/5" />
+                        <padding className="w-64 h-64 text-white/5" />
                         {/* Simulation of hitgroups */}
                         <HitIndicator top="10%" left="50%" label="HEAD" value="12.4%" active />
                         <HitIndicator top="30%" left="50%" label="CHEST" value="44.8%" active />
@@ -408,7 +426,7 @@ export default function MatchDetail() {
   );
 }
 
-function ProfessionalScoreboard({ teamName, players, score, isWinner, totalRounds }: { teamName: string, players: any[], score: number, isWinner: boolean, totalRounds: number }) {
+function ProfessionalScoreboard({ teamName, players, score, isWinner, totalRounds, currentUser }: { teamName: string, players: any[], score: number, isWinner: boolean, totalRounds: number, currentUser?: any }) {
    return (
       <div className="glass-heavy rounded-xl overflow-hidden border border-white/5 mb-8">
          <div className="px-6 py-4 bg-white/[0.02] flex items-center justify-between border-b border-white/5">
@@ -454,7 +472,7 @@ function ProfessionalScoreboard({ teamName, players, score, isWinner, totalRound
                </thead>
                <tbody className="divide-y divide-white/5">
                   {players.sort((a,b) => (b.rating || 0) - (a.rating || 0)).map((p, i) => (
-                     <tr key={i} className="hover:bg-white/[0.02] transition-colors group">
+                     <tr key={p.steamId || i} className="hover:bg-white/[0.02] transition-colors group">
                         <td className="pl-6 pr-4 py-3">
                            <Link to={`/player/${p.steamId}`} className="flex items-center gap-3 group/name">
                               <div className="relative">
@@ -463,7 +481,9 @@ function ProfessionalScoreboard({ teamName, players, score, isWinner, totalRound
                               </div>
                               <div className="flex flex-col min-w-0">
                                  <span className="text-[11px] font-bold text-white group-hover/name:text-accent transition-colors uppercase truncate max-w-[120px]">{p.name}</span>
-                                 {i === 1 && <span className="text-[7px] font-black text-accent uppercase tracking-tighter">YOU</span>}
+                                 {p.steamId === currentUser?.steam_id && (
+                                    <span className="text-[7px] font-black text-accent uppercase tracking-tighter">YOU</span>
+                                 )}
                               </div>
                            </Link>
                         </td>
@@ -621,7 +641,7 @@ const OperativeCard: React.FC<{ player: any, delay: number, accent: string }> = 
                color={player.premierRatingAfter ? 'white' : 'white/20'} 
             />
          </div>
-         <div className="space-y-1 mt-auto pt-4"> {/* Added a div to contain the remaining stats with space-y-1 */}
+         <div className="space-y-1 mt-auto pt-4">
              <OperativeStat label="Extermination" value={`${player.kills || 0}/${player.deaths || 0}`} />
              <OperativeStat label="Engagement" value={`${Number(player.adr || 0).toFixed(1)} ADR`} />
              <OperativeStat label="Accuracy" value={`${Number(player.hsPercent || 0).toFixed(0)}% HS`} />

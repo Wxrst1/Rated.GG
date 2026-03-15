@@ -177,6 +177,18 @@ new Worker('demos', async (job) => {
   const parsed = await parseDemo(demoPath)
   console.log(`[DemoWorker] ${parsed.map} | ${parsed.scoreTeam1}-${parsed.scoreTeam2} | ${parsed.players.length} players`)
 
+  // Log Premier Ratings found for ALL players
+  const playersWithRatings = parsed.players.filter(p => p.premierRatingAfter !== undefined);
+  if (playersWithRatings.length > 0) {
+    console.log(`[DemoWorker] 📊 Premier Ratings found for ${playersWithRatings.length} players:`)
+    playersWithRatings.forEach(p => {
+      const deltaStr = p.premierDelta! >= 0 ? `+${p.premierDelta}` : `${p.premierDelta}`;
+      console.log(`   - ${p.name}: ${p.premierRatingBefore} -> ${p.premierRatingAfter} (${deltaStr})`);
+    });
+  } else {
+    console.log(`[DemoWorker] ℹ️ No 'rank_update' events found in this demo (might not be a Premier match).`)
+  }
+
   // Step 4: Save event stats to Supabase
   console.log(`[DemoWorker] 💾 Saving event stats...`)
   const officialScores = (demoInfo.scoreTeam1 > 0 || demoInfo.scoreTeam2 > 0)

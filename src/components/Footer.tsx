@@ -1,4 +1,5 @@
 import { Shield, Github, Twitter } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 export default function Footer() {
   return (
@@ -7,12 +8,13 @@ export default function Footer() {
       <div className="max-w-7xl mx-auto px-6 relative z-10">
         <div className="flex flex-col md:flex-row justify-between items-start gap-16">
           <div className="flex flex-col gap-6 max-w-sm">
-            <div className="flex items-center gap-4">
-               <div className="w-10 h-10 bg-white/5 rounded-xl flex items-center justify-center border border-white/10 group hover:border-accent/40 transition-all">
-                  <Shield className="w-5 h-5 text-white/20 group-hover:text-accent" />
-               </div>
-               <span className="font-display text-3xl text-white uppercase italic tracking-tighter">Rated.gg</span>
-            </div>
+            <Link to="/" className="group flex items-center">
+               <img 
+                 src="/src/assets/logo.svg" 
+                 alt="Rated.gg Logo" 
+                 className="h-20 w-auto opacity-80 group-hover:opacity-100 transition-all"
+               />
+            </Link>
             <p className="text-[11px] font-mono text-white/20 uppercase tracking-[0.4em] leading-relaxed">
                Maintaining competitive integrity via decentralized behavioral forensics. 
                The truth of the grid is absolute.

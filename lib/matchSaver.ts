@@ -15,8 +15,12 @@ export async function saveMatch(
 ): Promise<string | null> {
   console.log(`[Saver] Saving match ${shareCode} (${gameMode || 'competitive'}) — ${parsed.map}`)
     
-      const s1 = officialScores ? officialScores.team1 : parsed.scoreTeam1
-      const s2 = officialScores ? officialScores.team2 : parsed.scoreTeam2
+      // Trust the parser's score for internal team consistency (Group 0 vs Group 1).
+      // Official scores from GC can be swapped or have different team indexing.
+      const s1 = parsed.scoreTeam1
+      const s2 = parsed.scoreTeam2
+      
+      console.log(`[Saver] Match Result: ${s1}-${s2} (Group 0 - Group 1)`)
       
       const matchData: any = {
         share_code: shareCode,
@@ -45,8 +49,8 @@ export async function saveMatch(
       const { data: match, error: matchError } = await supabase
         .from('matches')
         .upsert(matchData, { onConflict: 'share_code' })
-    .select('id')
-    .single()
+        .select('id')
+        .single()
 
   if (matchError || !match) {
     console.error('[Saver] Error saving match:', matchError)
@@ -57,10 +61,8 @@ export async function saveMatch(
 
   // 2. Save stats for ALL 10 players
   const statsToInsert = parsed.players.map(p => {
-    // Robust result calculation based on official scores
+    // Robust result calculation based on the scores we just saved
     let finalResult: 'WIN' | 'LOSS' | 'TIE' = p.result
-    const s1 = officialScores ? officialScores.team1 : parsed.scoreTeam1
-    const s2 = officialScores ? officialScores.team2 : parsed.scoreTeam2
 
     if (s1 === s2) {
       finalResult = 'TIE'
@@ -100,7 +102,10 @@ export async function saveMatch(
       shots_hit: p.shotsHit,
       accuracy: p.accuracy,
       kast: p.kast,
-      premier_rating_after: premierRatings?.[p.steamId] || p.premierRatingAfter || null
+      premier_rating_before: p.premierRatingBefore || null,
+      premier_rating_after: p.premierRatingAfter || premierRatings?.[p.steamId] || null,
+      premier_delta: p.premierDelta || null,
+      team_group: p.group
     }
   })
 
@@ -111,7 +116,7 @@ export async function saveMatch(
   if (statsError) console.error('[Saver] Stats error:', statsError)
   else console.log(`[Saver] ✅ Saved stats for ${statsToInsert.length} players`)
 
-  // 3. Check which players are registered vs ghosts
+  // 3. Update player name/avatar cache
   const steamIds = parsed.players.map(p => p.steamId).filter(Boolean)
 
   const { data: registeredPlayers } = await supabase
@@ -120,20 +125,32 @@ export async function saveMatch(
     .in('steam_id', steamIds)
 
   const registeredIds = new Set(registeredPlayers?.map(p => p.steam_id) || [])
-
+  const playersToEnrich: string[] = []
+  
   for (const player of parsed.players) {
     if (!player.steamId || player.steamId === '0') continue
 
     if (registeredIds.has(player.steamId)) {
-      // Registered — update their summary
+      // Registered — update their stats and check if they need avatar/name
       await updatePlayerSummary(player.steamId)
+      
+      // If registered player is missing basic info, add to enrichment list
+      const { data: regProfile } = await supabase
+        .from('players')
+        .select('name, avatar')
+        .eq('steam_id', player.steamId)
+        .maybeSingle()
+      
+      if (!regProfile?.avatar || !regProfile?.name || regProfile.name === 'Unknown') {
+        playersToEnrich.push(player.steamId)
+      }
     } else {
       // Ghost — create or update
       const { data: existing } = await supabase
         .from('ghost_profiles')
-        .select('steam_id, total_matches')
+        .select('steam_id, total_matches, name, avatar')
         .eq('steam_id', player.steamId)
-        .single()
+        .maybeSingle()
 
       const currentRating = premierRatings?.[player.steamId] || null;
 
@@ -141,12 +158,16 @@ export async function saveMatch(
         await supabase
           .from('ghost_profiles')
           .update({
-            name: player.name,
+            name: player.name || existing.name,
             last_seen: parsed.playedAt.toISOString(),
-            total_matches: existing.total_matches + 1,
-            current_premier_rating: currentRating || undefined // Only update if we have a new one
+            total_matches: (existing.total_matches || 0) + 1,
+            current_premier_rating: currentRating || undefined
           })
           .eq('steam_id', player.steamId)
+        
+        if (!existing.avatar || !existing.name) {
+          playersToEnrich.push(player.steamId)
+        }
       } else {
         await supabase
           .from('ghost_profiles')
@@ -158,32 +179,24 @@ export async function saveMatch(
             last_seen: parsed.playedAt.toISOString(),
             current_premier_rating: currentRating
           })
+        playersToEnrich.push(player.steamId)
       }
     }
   }
 
-  // 4. Enrich ghost avatars from Steam API
-  const ghostIds = steamIds.filter(id => !registeredIds.has(id))
-  if (ghostIds.length > 0) {
-    await enrichGhostProfiles(ghostIds)
+  // Proactively enrich all profiles that need it
+  if (playersToEnrich.length > 0) {
+    console.log(`[Saver] Proactively enriching ${playersToEnrich.length} profiles...`)
+    await enrichGhostProfiles(playersToEnrich)
   }
 
   return matchId
 }
 
-// EXPORTED — needed by cronJobs.ts
 export async function enrichGhostProfiles(steamIds: string[]): Promise<void> {
   if (steamIds.length === 0) return
 
-  const { data: ghosts } = await supabase
-    .from('ghost_profiles')
-    .select('steam_id')
-    .in('steam_id', steamIds)
-    .is('avatar', null)
-
-  if (!ghosts || ghosts.length === 0) return
-
-  const chunks = chunkArray(ghosts.map(g => g.steam_id), 100)
+  const chunks = chunkArray(steamIds, 100)
 
   for (const chunk of chunks) {
     try {
@@ -195,14 +208,29 @@ export async function enrichGhostProfiles(steamIds: string[]): Promise<void> {
       const players = data?.response?.players || []
 
       for (const sp of players) {
-        await supabase
-          .from('ghost_profiles')
-          .update({ name: sp.personaname, avatar: sp.avatarfull })
-          .eq('steam_id', sp.steamid)
-          .is('claimed_at', null)
+        const sid = sp.steamid
+        
+        // Update ghost profile if exists
+        const { data: ghost } = await supabase.from('ghost_profiles').select('id').eq('steam_id', sid).maybeSingle()
+        if (ghost) {
+           await supabase
+            .from('ghost_profiles')
+            .update({ name: sp.personaname, avatar: sp.avatarfull })
+            .eq('steam_id', sid)
+            .is('claimed_at', null)
+        }
+
+        // Update registered profile if exists and missing avatar
+        const { data: reg } = await supabase.from('players').select('id, avatar').eq('steam_id', sid).maybeSingle()
+        if (reg && !reg.avatar) {
+           await supabase
+            .from('players')
+            .update({ name: sp.personaname, avatar: sp.avatarfull })
+            .eq('steam_id', sid)
+        }
       }
 
-      console.log(`[Saver] Enriched ${players.length} ghost profiles`)
+      console.log(`[Saver] Enriched ${players.length} profiles from Steam API`)
     } catch (e) {
       console.error('[Saver] Enrichment error:', e)
     }

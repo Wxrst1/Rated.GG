@@ -39,14 +39,12 @@ export default function Navbar() {
       <div className="max-w-7xl mx-auto px-6 w-full flex items-center justify-between">
         
         {/* LOGO REDESIGN */}
-        <Link to="/" className="group flex items-center gap-4">
-          <div className="w-12 h-12 bg-accent rounded-2xl flex items-center justify-center rotate-[-3deg] group-hover:rotate-6 transition-all duration-500 shadow-[0_0_30px_rgba(255,199,0,0.3)]">
-            <Shield className="w-6 h-6 text-black" fill="currentColor" />
-          </div>
-          <div className="flex flex-col">
-            <span className="font-display text-4xl tracking-tight text-white leading-none uppercase italic">Rated.gg</span>
-            <span className="text-[8px] font-black text-accent tracking-[0.5em] uppercase mt-1 opacity-60">Forensic Network</span>
-          </div>
+        <Link to="/" className="group flex items-center">
+          <img 
+            src="/src/assets/logo.svg" 
+            alt="Rated.gg Logo" 
+            className="h-16 w-auto group-hover:drop-shadow-[0_0_15px_rgba(255,199,0,0.3)] transition-all"
+          />
         </Link>
 
         {/* INTEGRATED SEARCH */}

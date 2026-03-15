@@ -166,6 +166,7 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
     const roundEnds = parseEvent(demoPath, 'round_end', [], ['is_warmup_period', 'winner', 'reason'])
     const roundStarts = parseEvent(demoPath, 'round_start', [], ['is_warmup_period'])
     const matchStarts = parseEvent(demoPath, 'round_announce_match_start')
+    const rankUpdates = parseEvent(demoPath, 'rank_update')
 
     const players = new Map<string, PlayerData>()
 
@@ -257,6 +258,10 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
     
     // Track which group each player belongs to (0 or 1)
     const playerGroup = new Map<string, number>()
+    
+    // Track which group is currently on T side (2) at match start
+    // Group 0 starts T by default — flips at halftime and overtime
+    let groupOnTSide = 0  // 0 = Group0 is T, 1 = Group1 is T
     const roundHistory: RoundHistory[] = []
     const killLog: KillEvent[] = []
     const clutches: ClutchEvent[] = []
@@ -269,26 +274,53 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
       // some demos have broken warmup flags on events
       
       if (e._type === 'match_start') {
+          // IMPORTANT: Only reset if we are actually at the beginning of the demo.
+          // Some demos/servers fire "match_start" again at halftime or after warmup restarts.
+          // If we already have scores or have progressed past a few rounds, DO NOT reset.
+          if (currentRound > 3 || (scoreGroupA + scoreGroupB > 0) || (e.tick > 100000 && currentRound > 1)) {
+              console.log(`[Parser] ℹ️ Ignoring mid-match 'match_start' event at tick ${e.tick} to preserve round history (Current R: ${currentRound}, Score: ${scoreGroupA}-${scoreGroupB})`)
+              continue
+          }
+
           console.log(`[Parser] 🏳️ Match Start! Current Tick: ${e.tick}`)
           scoreGroupA = 0; scoreGroupB = 0; currentRound = 1;
           playerGroup.clear()
+          groupOnTSide = -1  // will be set by first team_change or death event
+          
+          // Initial assignment based on current side
           for (const [sid, p] of players.entries()) {
-            if (p.teamNumber === 2) playerGroup.set(sid, 0)
-            else if (p.teamNumber === 3) playerGroup.set(sid, 1)
+            if (p.teamNumber === 2) {
+              playerGroup.set(sid, 0)
+              if (groupOnTSide === -1) groupOnTSide = 0
+              console.log(`[Parser] -> Player ${p.name} (${sid}) assigned to Group 0 (Started T)`)
+            }
+            else if (p.teamNumber === 3) {
+              playerGroup.set(sid, 1)
+              console.log(`[Parser] -> Player ${p.name} (${sid}) assigned to Group 1 (Started CT)`)
+            }
             p.kills = 0; p.deaths = 0; p.assists = 0; p.damage = 0; p.headshots = 0;
             p.roundWins = 0; p.mvps = 0; p.kastRounds.clear(); p.roundKills = 0;
           }
+          if (groupOnTSide === -1) groupOnTSide = 0  // default
           continue
       }
       if (e._type === 'team_change') {
           const sid = e.user_steamid?.toString() || e.steamid?.toString()
           const team = Number(e.team || e.user_team_num || 0)
           if (sid && sid !== '0' && (team === 2 || team === 3)) {
-              getOrInitPlayer(sid, e.user_name || e.name, team)
-              // Assign group based on their first team after match start
+              const p = getOrInitPlayer(sid, e.user_name || e.name, team)
+              p.teamNumber = team
+              
+              // Assign group based on their first team after match start if not already set
               if (!playerGroup.has(sid)) {
-                  // If they join team 2, they are Group 0. If team 3, Group 1.
-                  playerGroup.set(sid, team === 2 ? 0 : 1)
+                  const g = team === 2 ? 0 : 1
+                  playerGroup.set(sid, g)
+                  // Use first T-side player to determine groupOnTSide
+                  if (groupOnTSide === -1 && team === 2) groupOnTSide = g
+                  else if (groupOnTSide === -1 && team === 3) groupOnTSide = g === 0 ? 1 : 0
+                  console.log(`[Parser] -> Late Assignment: Player ${p.name} (${sid}) assigned to Group ${g} based on team ${team}`)
+              } else {
+                  console.log(`[Parser] Side Swap: Player ${p.name} (${sid}) is now on team ${team}`)
               }
           }
       }
@@ -462,35 +494,31 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
           if (winner === 2 || winner === 3) {
             console.log(`[Parser] Round ${currentRound} (Event R:${eventRound}) End. RawWinner: ${e.winner}, Reason: ${e.reason} -> FinalWinner: ${winner === 2 ? 'T' : 'CT'}`)
             
-            // Find a player who is currently on the winning side to see which group they belong to
-            let winningGroup: number | null = null
-            const playersArr = Array.from(players.values())
+            // Simple: winner is T(2) or CT(3). groupOnTSide tells us which group is T right now.
+            const playersArrForWinner = Array.from(players.values())
             
-            // Try to find a human player in a group on the winning side
-            for (const p of playersArr) {
-                if (p.teamNumber === winner && playerGroup.has(p.steamId)) {
-                    winningGroup = playerGroup.get(p.steamId)!
-                    break
+            // If groupOnTSide not set yet, try to infer from playerGroup
+            if (groupOnTSide === -1 || groupOnTSide === undefined) {
+              for (const p of playersArrForWinner) {
+                if (p.teamNumber === 2) {
+                  const g = playerGroup.get(p.steamId)
+                  if (g !== undefined) { groupOnTSide = g; break }
                 }
+              }
+              if (groupOnTSide === -1) groupOnTSide = 0
             }
             
-            let roundWinnerGroup = -1
-            if (winningGroup === 0) {
-                scoreGroupA++
-                roundWinnerGroup = 0
-            } else if (winningGroup === 1) {
-                scoreGroupB++
-                roundWinnerGroup = 1
+            let roundWinnerGroup: number
+            if (winner === 2) {
+              // T side wins — groupOnTSide is T
+              roundWinnerGroup = groupOnTSide
             } else {
-                // Fallback: the side that won is likely the group that was on that side at start
-                if (winner === 2) {
-                    scoreGroupA++
-                    roundWinnerGroup = 0
-                } else {
-                    scoreGroupB++
-                    roundWinnerGroup = 1
-                }
+              // CT side wins — the other group
+              roundWinnerGroup = groupOnTSide === 0 ? 1 : 0
             }
+            
+            if (roundWinnerGroup === 0) scoreGroupA++
+            else scoreGroupB++
 
             roundHistory.push({
                 winnerGroup: roundWinnerGroup,
@@ -502,7 +530,7 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
             
             console.log(`[Parser] Round ${currentRound} (Event R:${eventRound}) End. Winner: ${winner === 2 ? 'T' : 'CT'}. Match Score: ${scoreGroupA}-${scoreGroupB}`)
             
-            for (const p of playersArr) {
+            for (const p of playersArrForWinner) {
               if (p.roundKills === 3) p.kills3++
               else if (p.roundKills === 4) p.kills4++
               else if (p.roundKills >= 5) p.kills5++
@@ -538,6 +566,23 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
             }
           }
           currentRound = eventRound + 1
+          
+          // Flip sides at halftime and overtime halftimes
+          // Wingman: halftime at round 6, OT every 3 rounds
+          // Standard: halftime at round 12, OT every 3 rounds
+          const r = currentRound - 1  // just finished round
+          const scoreSum = scoreGroupA + scoreGroupB
+          // Detect wingman: if max score in first 6 rounds hits 6, it's wingman
+          const isWingman = r <= 12 && (scoreGroupA >= 6 || scoreGroupB >= 6)
+          const halfAt = isWingman ? 6 : 12
+          const otBase = isWingman ? 12 : 24
+          const otStep = 3
+          const isHalftime = r === halfAt
+          const isOTHalftime = r > otBase && ((r - otBase) % otStep === 0) && r !== otBase
+          if (isHalftime || isOTHalftime) {
+            groupOnTSide = groupOnTSide === 0 ? 1 : 0
+            console.log(`[Parser] 🔄 Side swap at round ${r} (${isWingman ? 'wingman' : 'standard'}) — Group ${groupOnTSide} now on T`)
+          }
       }
     }
 
@@ -603,6 +648,19 @@ export async function parseDemo(demoPath: string): Promise<ParsedMatch> {
         accuracy: Math.round(accuracy * 10) / 10,
         kast: Math.round(kast * 10) / 10,
         rating: Math.round(rating * 1000) / 1000,
+        
+        // Add Premier Rating info from demo events
+        ...(() => {
+            const update = (rankUpdates || []).find((ru: any) => 
+                ru.user_steamid?.toString() === p.steamId && ru.rank_type_id === 11
+            );
+            return update ? {
+                premierRatingBefore: update.rank_old,
+                premierRatingAfter: update.rank_new,
+                premierDelta: update.rank_change
+            } : {};
+        })(),
+
         weaponStats: Object.fromEntries(p.weaponStats.entries()),
         hitStats: p.hitStats
       })

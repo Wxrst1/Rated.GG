@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ShieldCheck, Lock, Globe, Zap, Cpu } from 'lucide-react';
+import { Lock, Globe, Zap, Cpu } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
 export default function Login() {
@@ -37,7 +37,7 @@ export default function Login() {
               className="w-20 h-20 bg-background border border-white/10 rounded-3xl flex items-center justify-center mb-8 relative group"
             >
               <div className="absolute inset-0 bg-accent/20 blur-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
-              <ShieldCheck className="w-10 h-10 text-accent relative z-10" />
+              <img src="/src/assets/favicon.svg" className="w-12 h-12 relative z-10" alt="Rated Icon" />
             </motion.div>
 
             <h1 className="text-5xl font-display text-white tracking-[0.2em] mb-4">

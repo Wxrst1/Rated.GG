@@ -3,11 +3,16 @@ import GlobalOffensive from 'globaloffensive'
 import { createWriteStream, mkdirSync, existsSync, unlinkSync, promises as fsPromises } from 'fs'
 import fs from 'fs'
 import path from 'path'
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 import https from 'https'
 import http from 'http'
 import unbzip2 from 'unbzip2-stream' // Modern import since it's in package.json
 import { decodeMatchShareCode } from 'csgo-sharecode'
 import SteamID from 'steamid'
+import { exec } from 'child_process'
+import { promisify } from 'util'
+const execAsync = promisify(exec)
 
 export interface DemoInfo {
   demoUrl: string
@@ -71,8 +76,18 @@ export async function initSteamBot(): Promise<void> {
 
     client.on('error', (err: any) => {
       console.error('[Bot] ❌ Login error:', err.message)
-      botInitPromise = null
-      reject(err)
+      if (err.message === 'LoggedInElsewhere') {
+        console.warn('[Bot] 🔄 Retrying login in 30s...')
+        setTimeout(() => client.logOn({ accountName: username, password }), 30000)
+      } else {
+        botInitPromise = null
+        reject(err)
+      }
+    })
+
+    client.on('disconnected', (eresult: number, msg: string) => {
+      console.warn(`[Bot] 🔌 Disconnected: ${eresult} (${msg}) - reconnecting...`)
+      botReady = false
     })
 
     csgo.on('connectedToGC', () => {
@@ -114,17 +129,33 @@ export async function getDemoInfo(shareCode: string): Promise<DemoInfo | null> {
       const matchIdStr = decoded.matchId.toString()
       console.log(`[Bot] 📡 Requesting matchId=${matchIdStr} token=${decoded.tvPort}`)
 
-      csgo.requestGame({
-        matchId: matchIdStr,
-        outcomeId: decoded.reservationId.toString(),
-        token: decoded.tvPort.toString()
-      })
+      // Use internal _send because the library's requestGame has a strict check that prevents requestType
+      const Language = require('globaloffensive/language.js');
+      const Protos = require('globaloffensive/protobufs/generated/_load.js');
+      
+      // Patch the encoder at runtime to support request_type (field id 4)
+      const ProtoClass = Protos.CMsgGCCStrike15_v2_MatchListRequestFullGameInfo;
+      const originalEncode = ProtoClass.encode;
+      ProtoClass.encode = function(message: any, writer: any) {
+        const w = originalEncode.call(this, message, writer);
+        if (message.request_type !== undefined) {
+          w.uint32(32).uint32(message.request_type); // Field 4, wire type 0
+        }
+        return w;
+      };
+
+      csgo._send(Language.MatchListRequestFullGameInfo, ProtoClass, {
+        matchid: matchIdStr,
+        outcomeid: decoded.reservationId.toString(),
+        token: decoded.tvPort.toString(),
+        request_type: 3
+      });
 
       const timeout = setTimeout(() => {
         console.warn(`[Bot] Timeout for ${shareCode}`)
         csgo.removeListener('matchList', handler)
         resolve(null)
-      }, 25000)
+      }, 45000)
 
       async function handler(matches: any[]) {
         const match = matches?.find(m => m.matchid?.toString() === matchIdStr)
@@ -158,18 +189,22 @@ export async function getDemoInfo(shareCode: string): Promise<DemoInfo | null> {
           
           const mapName = match.watchablematchinfo?.map || demoUrl.match(/de_[a-z0-9_]+/)?.[0] || 'unknown'
 
-          // Better Game Mode Detection
-          let gameMode = 'competitive'
+          // Game Mode Detection via game_type bit flags
+          // bit 3 (8) + bit 9 (512) = 520 = Premier
+          // bit 23 (8388608) = Wingman
+          // bit 1 (2) = Competitive
+          const gameTypeRaw = lastRound.reservation?.game_type || 0
           const numPlayers = (match.player_stats || []).length
           const maxRounds = match.max_rounds || 0
           
-          console.log(`[Bot] teamScores raw: ${lastRound.teamScores} keys: ${Object.keys(match)}`)
+          let gameMode = 'competitive'
+          const isPremier = (gameTypeRaw & 8) !== 0 && (gameTypeRaw & 512) !== 0
+          const isWingman = (gameTypeRaw & 8388608) !== 0
+          if (isWingman) gameMode = 'wingman'
+          else if (isPremier) gameMode = 'premier'
           
-          if (numPlayers > 0 && numPlayers <= 4) gameMode = 'wingman'
-          else if (match.player_stats?.some((p: any) => (p.rank || 0) > 0 && p.rank < 40000)) gameMode = 'premier'
-          else if (match.match_duration > 0 && match.match_duration < 1500 && numPlayers <= 4) gameMode = 'wingman'
-          
-          console.log(`[Bot] Results from GC: ${scoreTeam1}-${scoreTeam2} Mode: ${gameMode} (Players: ${numPlayers}, MaxRounds: ${maxRounds})`)
+          console.log(`[Bot] game_type: ${gameTypeRaw} -> ${gameMode}`)
+          console.log(`[Bot] Results from GC: ${scoreTeam1}-${scoreTeam2} Mode: ${gameMode}`)
 
           // Extract Premier ratings for ALL 10 players
           const premierRatings: Record<string, number> = {}
@@ -200,29 +235,25 @@ export async function getDemoInfo(shareCode: string): Promise<DemoInfo | null> {
             console.log(`[Bot] 📊 Captured Premier ratings for ${Object.keys(premierRatings).length} players in match ${matchIdStr}`)
           }
 
-          // Try requestPlayersProfile for ALL players in match
+          // Try requestPlayersProfile (GC Probe) if bot is prime/friend it might work
           const reservationAccountIds = lastRound.reservation?.account_ids || []
           if (reservationAccountIds.length > 0) {
-            console.log(`[Bot] 🔍 Probing GC profiles for ${reservationAccountIds.length} players to find missing ranks...`)
             reservationAccountIds.forEach((id: any) => {
-              try {
-                const steamId64 = (BigInt(id) + 76561197960265728n).toString()
-                if (premierRatings[steamId64]) return; // Skip if already have it
+              const steamId64 = (BigInt(id) + 76561197960265728n).toString()
+              if (premierRatings[steamId64]) return;
 
-                const sid = new SteamID(steamId64)
-                csgo.requestPlayersProfile(sid, (data: any) => {
-                  if (data?.rankings) {
+              const sid = new SteamID(steamId64)
+              csgo.requestPlayersProfile(sid, (data: any) => {
+                if (data?.rankings) {
                     const premier = data.rankings.find((r: any) => r.rank_type_id === 11);
                     if (premier && premier.rank_id > 0) {
                       premierRatings[steamId64] = premier.rank_id;
-                      console.log(`[Bot] ✅ PROBE SUCCESS for ${steamId64}: ${premier.rank_id}`);
                     }
-                  }
-                });
-              } catch (e: any) {}
+                }
+              });
             });
-            // Give it 5 seconds for probes to complete
-            await new Promise(r => setTimeout(r, 5000));
+            // Brief wait for probes
+            await new Promise(r => setTimeout(r, 2000));
           }
 
           console.log(`[Bot] ✅ Found Demo: ${mapName} ${scoreTeam1}-${scoreTeam2} (Ratings: ${Object.keys(premierRatings).length})`)

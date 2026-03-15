@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 24" width="80" height="24">
+  <!-- Shield mini -->
+  <path d="M12,3 L19,3 L19,15 Q12,19 12,19 Q12,19 5,15 L5,3 Z" fill="#0a0a0a" stroke="#f5c842" stroke-width="1.2"/>
+  <text x="12" y="13.5" fill="#f5c842" font-family="sans-serif" font-weight="700" font-size="9" text-anchor="middle">R</text>
+  <line x1="5" y1="3" x2="8" y2="3" stroke="#f5c842" stroke-width="1"/>
+  <line x1="5" y1="3" x2="5" y2="6" stroke="#f5c842" stroke-width="1"/>
+  <line x1="19" y1="3" x2="16" y2="3" stroke="#f5c842" stroke-width="1"/>
+  <line x1="19" y1="3" x2="19" y2="6" stroke="#f5c842" stroke-width="1"/>
+  <!-- Label -->
+  <text x="25" y="14" fill="#f5c842" font-family="sans-serif" font-weight="500" font-size="9" letter-spacing="0.1em">RATED.GG</text>
+</svg>

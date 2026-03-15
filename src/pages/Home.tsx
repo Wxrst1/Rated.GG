@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, ShieldCheck, Zap, Activity, ArrowRight, MousePointer2, Fingerprint, Globe, ShieldAlert } from 'lucide-react';
+import { Search, Activity, ArrowRight, MousePointer2, Fingerprint, Globe } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence, useScroll, useTransform } from 'framer-motion';
 
@@ -104,7 +104,7 @@ export default function Home() {
           animate={{ opacity: 1, letterSpacing: "0.4em" }}
           className="mb-12 flex items-center gap-4 px-8 py-3 glass rounded-full border-accent/20"
         >
-          <Zap className="w-3.5 h-3.5 text-accent animate-pulse" />
+          <img src="/src/assets/favicon.svg" className="w-4 h-4 animate-pulse opacity-80" alt="Rated Icon" />
           <span className="text-[10px] font-mono font-black text-white/60 uppercase">System Status: Active Terminal // NODE-7</span>
         </motion.div>
 
@@ -363,7 +363,7 @@ function EliteDossier({ player, delay, key }: { player: any, delay: number, key?
         <div className="text-center flex-1 mt-6">
           <h5 className="text-3xl font-display text-white tracking-widest uppercase mb-4 group-hover:text-accent transition-colors">{player.name}</h5>
           <div className="flex items-center justify-center gap-2 mb-10">
-            <ShieldAlert className="w-3 h-3 text-white/20" />
+            <img src="/src/assets/favicon.svg" className="w-3 h-3 opacity-20" alt="Rated Icon" />
             <span className="text-[10px] font-black text-white/20 uppercase tracking-[0.4em]">Grid Status: Cleared</span>
           </div>
 

@@ -3,9 +3,9 @@ import { useParams, Link } from 'react-router-dom';
 import { 
   ThumbsUp, Clock, Trophy, Activity, 
   ShieldAlert, Globe, 
-  User, ShieldCheck, Target, 
+  User, Target, 
   ArrowUpRight, ChevronRight, Shield,
-  Calendar, History, ChevronDown, ActivitySquare,
+  Calendar, History, ActivitySquare,
   AlertTriangle, Settings, Archive
 } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -155,9 +155,7 @@ export default function PlayerProfile() {
                   <div className="text-center mb-6 z-10 w-full">
                      <div className="flex flex-col items-center justify-center gap-1 mb-6">
                         <div className="flex items-center gap-2">
-                           <span className="w-6 h-6 rounded-full border border-accent text-accent flex items-center justify-center text-[10px] font-bold">
-                              {player.level || 0}
-                           </span>
+                           <img src="/src/assets/badge-user.svg" className="h-6 w-auto mb-2" alt="Rated Badge" />
                            <h1 className="text-xl font-display font-black tracking-wider truncate max-w-[180px] uppercase">{player.name}</h1>
                         </div>
                         <div className="text-[10px] text-muted uppercase font-bold tracking-widest flex items-center gap-2">
@@ -315,7 +313,7 @@ export default function PlayerProfile() {
                                  activeSubTab === t ? "text-accent" : "text-muted hover:text-text"
                               )}
                            >
-                              {t === 'CSRep' && <ShieldCheck className="w-5 h-5 mb-1" />}
+                              {t === 'CSRep' && <img src="/src/assets/favicon.svg" className="w-5 h-5 mb-1" />}
                               {t === 'FACEIT' && <span className="font-display text-xl text-orange-500 mb-1">FACEIT</span>}
                               {t === 'Leetify' && <ActivitySquare className="w-5 h-5 text-red-500 mb-1" />}
                               {t === 'GamersClub' && <Globe className="w-5 h-5 text-blue-400 mb-1" />}
@@ -328,7 +326,7 @@ export default function PlayerProfile() {
                      <div className="p-4 lg:p-8">
                         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
                            <div className="flex items-center gap-3">
-                              <ShieldCheck className="w-6 h-6 text-accent" />
+                               <img src="/src/assets/favicon.svg" className="w-6 h-6" />
                               <h2 className="text-xl font-display font-black tracking-wider uppercase">Integrity Analysis</h2>
                            </div>
                            <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/5 rounded text-[10px] font-bold text-muted uppercase tracking-widest cursor-default">
@@ -341,9 +339,17 @@ export default function PlayerProfile() {
                            {/* Trust Pulse */}
                            <div className="flex flex-col items-center justify-center w-[220px] shrink-0 mx-auto xl:mx-0">
                               <div className="relative w-48 h-48 drop-shadow-[0_0_30px_var(--color-accent-soft)]">
-                                 <svg className="w-full h-full -rotate-90">
-                                    <circle cx="50%" cy="50%" r="44%" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="8" />
-                                    <circle cx="50%" cy="50%" r="44%" fill="none" stroke="var(--color-accent)" strokeWidth="8" strokeDasharray="276.4" strokeDashoffset={276.4 - (276.4 * trustScore) / 100} className="transition-all duration-1000 ease-out" />
+                                 <svg className="w-full h-full -rotate-90" viewBox="0 0 100 100">
+                                    <circle cx="50" cy="50" r="44" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="8" />
+                                    <circle 
+                                       cx="50" cy="50" r="44" fill="none" 
+                                       stroke="var(--color-accent)" 
+                                       strokeWidth="8" 
+                                       strokeDasharray="276.4" 
+                                       strokeDashoffset={276.4 - (276.4 * trustScore) / 100} 
+                                       strokeLinecap="round"
+                                       className="transition-all duration-1000 ease-out" 
+                                    />
                                  </svg>
                                  <div className="absolute inset-0 flex flex-col items-center justify-center">
                                     <span className="text-5xl font-mono font-black text-accent">{trustScore}%</span>
@@ -451,8 +457,12 @@ export default function PlayerProfile() {
 
                                  <div className="flex flex-col gap-1">
                                     <div className="text-xs font-black uppercase tracking-widest flex items-center gap-2">
-                                       <span className={cn(m.result === 'WIN' ? 'text-accent' : 'text-danger')}>
-                                          {m.result === 'WIN' ? 'Success' : 'Failed'}
+                                       <span className={cn(
+                                          m.result === 'WIN' ? 'text-accent' : 
+                                          m.result === 'LOSS' ? 'text-danger' : 
+                                          'text-white/40'
+                                       )}>
+                                          {m.result === 'WIN' ? 'WIN' : m.result === 'LOSS' ? 'LOSS' : 'DRAW'}
                                        </span>
                                        <span className="text-muted/30">/</span>
                                        <span className="text-text">{m.score}</span>
@@ -522,7 +532,7 @@ export default function PlayerProfile() {
                               <div className="p-4 flex flex-col -mt-8 z-10">
                                  <div className="flex justify-between text-center px-1 mb-6 gap-2">
                                     <div className="flex flex-col gap-2 items-center flex-1">
-                                       <span className="text-[8px] font-black uppercase text-muted tracking-tighter">SUCCESS</span>
+                                       <span className="text-[8px] font-black uppercase text-muted tracking-tighter">WIN RATE</span>
                                        <div className={cn("w-12 h-12 flex items-center justify-center rounded-full border-2 font-black text-[10px] bg-background", wrClass)}>
                                           {map.winRate}%
                                        </div>

@@ -853,7 +853,7 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
 
     const { data: dbMatches, error: dbMatchError } = await supabase
        .from('player_match_stats')
-       .select('match_id, result, kills, deaths, assists, adr, headshots, rating, premier_rating_after, matches(map, played_at, score_team1, score_team2, match_id)')
+       .select('match_id, result, kills, deaths, assists, adr, headshots, rating, premier_rating_after, team_group, matches(map, played_at, score_team1, score_team2, match_id)')
        .order('id', { ascending: false })
        .eq('steam_id', matchSteamId)
        .limit(100);
@@ -863,21 +863,29 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
     }
     console.log(`[Profile] Found ${dbMatches?.length || 0} matches in DB`);
 
-    const internalizedMatches = (dbMatches || []).map((dbm: any) => ({
-       id: dbm.match_id,
-       map: dbm.matches?.map || 'Unknown Map',
-       time: dbm.matches?.played_at ? new Date(dbm.matches.played_at).getTime() / 1000 : 0,
-       result: dbm.result,
-       score: dbm.matches ? `${dbm.matches.score_team1}-${dbm.matches.score_team2}` : '0-0',
-       kills: dbm.kills,
-       deaths: dbm.deaths,
-       assists: dbm.assists,
-       adr: dbm.adr,
-       rating: dbm.rating || (dbm as any).matches?.rating || 0,
-       premierRating: dbm.premier_rating_after,
-       hs: `${dbm.headshots}%`,
-       source: 'INTERNAL'
-    }));
+    const internalizedMatches = (dbMatches || []).map((dbm: any) => {
+       const isGroup0 = dbm.team_group !== null 
+         ? dbm.team_group === 0 
+         : (dbm.result === 'WIN' ? Number(dbm.matches?.score_team1) > Number(dbm.matches?.score_team2) : Number(dbm.matches?.score_team1) < Number(dbm.matches?.score_team2));
+       const s1 = dbm.matches?.score_team1 || 0;
+       const s2 = dbm.matches?.score_team2 || 0;
+       
+       return {
+          id: dbm.match_id,
+          map: dbm.matches?.map || 'Unknown Map',
+          time: dbm.matches?.played_at ? new Date(dbm.matches.played_at).getTime() / 1000 : 0,
+          result: dbm.result,
+          score: isGroup0 ? `${s1}-${s2}` : `${s2}-${s1}`,
+          kills: dbm.kills,
+          deaths: dbm.deaths,
+          assists: dbm.assists,
+          adr: dbm.adr,
+          rating: dbm.rating || (dbm as any).matches?.rating || 0,
+          premierRating: dbm.premier_rating_after,
+          hs: `${dbm.headshots}%`,
+          source: 'INTERNAL'
+       };
+    });
 
     // --- Fetch Aggregated Database Stats ---
     const { data: dbStats, error: dbStatsError } = await supabase
@@ -988,6 +996,19 @@ app.get('/api/player/:idOrVanity', async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+app.post('/api/matches/:matchId/reparse', async (req, res) => {
+  const { matchId } = req.params;
+  try {
+     const { data: match } = await supabase.from('matches').select('share_code').eq('id', matchId).single();
+     if (!match) return res.status(404).json({ error: 'Match not found' });
+     
+     await demoQueue.add('reprocess', { shareCode: match.share_code }, { priority: 1, attempts: 3 });
+     res.json({ success: true, message: 'Reprocess job queued for ' + match.share_code });
+  } catch (e: any) {
+     res.status(500).json({ error: e.message });
   }
 });
 
@@ -1394,11 +1415,36 @@ app.get('/api/matches/:matchId', async (req, res) => {
     if (ghostErr) console.error(`[API] !! GhostPlayers query error:`, ghostErr)
 
     const profileMap = new Map<string, { name: string, avatar: string | null, registered: boolean }>()
+    const idsToEnrich: string[] = []
+
     for (const p of ghostPlayers || []) {
       profileMap.set(p.steam_id, { name: p.name, avatar: p.avatar, registered: false })
+      if (!p.avatar || p.name === 'Unknown') idsToEnrich.push(p.steam_id)
     }
     for (const p of registeredPlayers || []) {
       profileMap.set(p.steam_id, { name: p.name, avatar: p.avatar, registered: true })
+      if (!p.avatar || p.name === 'Unknown') idsToEnrich.push(p.steam_id)
+    }
+
+    // Proactive enrichment if data missing during view
+    if (idsToEnrich.length > 0 && STEAM_API_KEY) {
+       console.log(`[API] 🩺 Self-healing ${idsToEnrich.length} missing profiles for match ${matchId}...`)
+       try {
+          const res = await fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${STEAM_API_KEY}&steamids=${idsToEnrich.join(',')}`)
+          const data = await res.json()
+          const players = data?.response?.players || []
+          for (const sp of players) {
+             profileMap.set(sp.steamid, { name: sp.personaname, avatar: sp.avatarfull, registered: profileMap.get(sp.steamid)?.registered || false })
+             
+             // Update DB silently
+             const isReg = profileMap.get(sp.steamid)?.registered
+             if (isReg) {
+                await supabase.from('players').update({ name: sp.personaname, avatar: sp.avatarfull }).eq('steam_id', sp.steamid)
+             } else {
+                await supabase.from('ghost_profiles').update({ name: sp.personaname, avatar: sp.avatarfull }).eq('steam_id', sp.steamid)
+             }
+          }
+       } catch (e) { console.error("[API] Enrichment error:", e) }
     }
 
     // Get TR (Trust Rating) from reputation_scores
@@ -1443,36 +1489,47 @@ app.get('/api/matches/:matchId', async (req, res) => {
         avgReaction: s.avg_reaction_time,
         preaim: s.preaim_percent,
         mvps: s.mvps || 0,
-        tr: repMap.get(s.steam_id) || 100
+        tr: repMap.get(s.steam_id) || 100,
+        teamGroup: s.team_group
       }
     })
 
-    // Split into teams
-    // Team 1 is usually T (2), Team 2 is usually CT (3)
-    let team1 = enrichedStats.filter((s: any) => Number(s.teamNumber) === 2).sort((a: any, b: any) => b.rating - a.rating)
-    let team2 = enrichedStats.filter((s: any) => Number(s.teamNumber) === 3).sort((a: any, b: any) => b.rating - a.rating)
+    // --- Smarter Team Splitting ---
+    // Instead of relying on the final side (T/CT), we reconstruct the original 
+    // teams (Group 0 vs Group 1) based on their match results and the score.
+    // score_team1 = Group 0 Score, score_team2 = Group 1 Score.
+    const score1 = Number(match.score_team1)
+    const score2 = Number(match.score_team2)
+    const g0Won = score1 > score2
+    const g1Won = score2 > score1
 
-    console.log(`[API] 👥 Initial Split: T1=${team1.length}, T2=${team2.length}`)
-
-    // If teams are empty or all in one team, try a smarter split
-    if (team1.length === 0 || team2.length === 0) {
-      console.log(`[API] ⚠️ Standard team IDs (2/3) missing. Detecting unique teams...`)
-      const uniqueTeams = Array.from(new Set(enrichedStats.map((s: any) => Number(s.teamNumber)))).filter(t => t > 0);
+    const groupStats = enrichedStats.map((s: any) => {
+      let group = -1
       
-      if (uniqueTeams.length >= 2) {
-        team1 = enrichedStats.filter((s: any) => Number(s.teamNumber) === uniqueTeams[0]).sort((a: any, b: any) => b.rating - a.rating)
-        team2 = enrichedStats.filter((s: any) => Number(s.teamNumber) === uniqueTeams[1]).sort((a: any, b: any) => b.rating - a.rating)
+      // 1. Try saved team_group if available (best)
+      if (s.teamGroup !== undefined && s.teamGroup !== null) {
+        group = s.teamGroup
+      } 
+      // 2. Fallback to smarter reconstruction for legacy matches
+      else if (score1 === score2) {
+        group = (Number(s.teamNumber) === 2) ? 0 : 1
       } else {
-        // Fallback: group by result
-        team1 = enrichedStats.filter((s: any) => s.result === 'WIN').sort((a: any, b: any) => b.rating - a.rating)
-        team2 = enrichedStats.filter((s: any) => s.result === 'LOSS' || s.result === 'TIE').sort((a: any, b: any) => b.rating - a.rating)
-        
-        // Final fallback: split in half
-        if (team1.length === 0 || team2.length === 0) {
-          team1 = enrichedStats.slice(0, Math.ceil(enrichedStats.length / 2))
-          team2 = enrichedStats.slice(Math.ceil(enrichedStats.length / 2))
+        if (g0Won) {
+          group = (s.result === 'WIN') ? 0 : 1
+        } else if (g1Won) {
+          group = (s.result === 'WIN') ? 1 : 0
         }
       }
+      return { ...s, group }
+    })
+
+    let team1 = groupStats.filter(s => s.group === 0).sort((a, b) => (b.rating || 0) - (a.rating || 0))
+    let team2 = groupStats.filter(s => s.group === 1).sort((a, b) => (b.rating || 0) - (a.rating || 0))
+
+    // Final balance check: if everyone ended up in one group (shouldn't happen with WIN/LOSS), split them
+    if (team1.length === 0 || team2.length === 0) {
+      team1 = groupStats.slice(0, Math.ceil(groupStats.length / 2))
+      team2 = groupStats.slice(Math.ceil(groupStats.length / 2))
     }
 
     console.log(`[API] ✅ Final Split: Team1=${team1.length}, Team2=${team2.length}`)

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Settings, MessageSquare, ThumbsUp, ThumbsDown, Edit, Trash2, Shield, Activity, Lock, ExternalLink } from 'lucide-react';
+import { User, Settings, MessageSquare, ThumbsUp, ThumbsDown, Edit, Trash2, Activity, Lock, ExternalLink } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { cn } from '../lib/utils';
 
@@ -62,7 +62,7 @@ export default function Dashboard() {
                 className="w-32 h-32 rounded-[2rem] mx-auto border-4 border-white/5 group-hover:scale-105 transition-transform duration-500" 
               />
               <div className="absolute -bottom-2 -right-2 bg-accent p-2 rounded-xl shadow-lg">
-                <Shield className="w-4 h-4 text-background" />
+                <img src="/src/assets/favicon.svg" className="w-4 h-4" />
               </div>
             </div>
             <h2 className="text-3xl font-display tracking-tight mb-2">{profile.personaname}</h2>
@@ -122,8 +122,8 @@ export default function Dashboard() {
 
                   <div className="bg-card/30 backdrop-blur-xl border border-white/5 rounded-[2rem] p-8 group hover:border-accent/30 transition-all">
                     <div className="flex items-center gap-4 mb-8">
-                       <Shield className="text-accent w-6 h-6" />
-                       <h3 className="text-gray-400 font-mono text-xs uppercase tracking-[0.2em] font-bold">Security Status</h3>
+                        <img src="/src/assets/favicon.svg" className="w-6 h-6 mb-1" />
+                        <h3 className="text-gray-400 font-mono text-xs uppercase tracking-[0.2em] font-bold">Security Status</h3>
                     </div>
                     <div className="space-y-4">
                        <div className="p-4 bg-white/5 rounded-2xl border border-white/5 flex items-center justify-between">
